@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: distributed-lite-scheduler-v1
+
+  # 从项目根目录加载 .env（Java Properties 格式），文件不存在时不报错
+  config:
+    import: optional:file:.env[.properties]
+
+  datasource:
+    # 默认值必须加引号，否则 YAML 会把 jdbc: 里的冒号当成键值分隔符导致解析失败
+    url: "${SPRING_DATASOURCE_URL:jdbc:mysql://localhost:3306/distributed_lite_scheduler?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}"
+    username: ${SPRING_DATASOURCE_USERNAME:root}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+
+  jackson:
+    default-property-inclusion: NON_NULL
+    datatype:
+      datetime:
+        write-dates-as-timestamps: false
+    time-zone: Asia/Shanghai
+
+  web:
+    error:
+      include-message: ALWAYS
+      include-binding-errors: ALWAYS
+
+server:
+  port: ${SERVER_PORT:8080}
+  servlet:
+    context-path: /
+
+logging:
+  level:
+    root: ${LOG_LEVEL_ROOT:INFO}
+    com.imperium.distributed_lite_scheduler_v1: ${LOG_LEVEL_APP:DEBUG}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+logging:
+  level:
+    com.imperium.distributed_lite_scheduler_v1: DEBUG
