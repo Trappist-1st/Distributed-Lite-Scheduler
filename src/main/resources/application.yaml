@@ -39,6 +39,11 @@ logging:
     root: ${LOG_LEVEL_ROOT:INFO}
     com.imperium.distributed_lite_scheduler_v1: ${LOG_LEVEL_APP:DEBUG}
 
+# JWT（HS256 密钥至少 32 字节；生产务必通过环境变量覆盖）
+jwt:
+  secret: ${JWT_SECRET:01234567890123456789012345678901}
+  expiration-ms: ${JWT_EXPIRATION_MS:86400000}
+
 ---
 spring:
   config:
