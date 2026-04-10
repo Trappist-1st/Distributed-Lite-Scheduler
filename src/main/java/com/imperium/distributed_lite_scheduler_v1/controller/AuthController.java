@@ -1,19 +1,14 @@
 package com.imperium.distributed_lite_scheduler_v1.controller;
 
-import com.imperium.distributed_lite_scheduler_v1.model.dto.LoginRequest;
-import com.imperium.distributed_lite_scheduler_v1.model.dto.LoginResponse;
-import com.imperium.distributed_lite_scheduler_v1.model.dto.RegisterRequest;
-import com.imperium.distributed_lite_scheduler_v1.model.dto.RegisterResponse;
+import com.imperium.distributed_lite_scheduler_v1.model.dto.*;
 import com.imperium.distributed_lite_scheduler_v1.security.JwtUserPrincipal;
 import com.imperium.distributed_lite_scheduler_v1.service.AuthService;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import jakarta.validation.Valid;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/auth")
@@ -42,5 +37,21 @@ public class AuthController {
     @GetMapping("/me")
     public Result<Long> me(@AuthenticationPrincipal JwtUserPrincipal principal) {
         return Result.success(principal.userId());
+    }
+
+    @GetMapping("/tenants")
+    public Result<List<LoginTenantItem>> getTenants(@AuthenticationPrincipal JwtUserPrincipal principal) {
+        return Result.success(authService.loadLoginTenants(principal.userId()));
+    }
+
+    /**
+     * 切换当前租户上下文。请求体填 {@code tenantId} 或 {@code tenantCode} 之一。
+     * 成功返回新的 tenant-scoped accessToken（与登录响应结构一致）。
+     */
+    @PostMapping("/switch-tenant")
+    public Result<LoginResponse> switchTenant(
+            @AuthenticationPrincipal JwtUserPrincipal principal,
+            @RequestBody SwitchTenantRequest request) {
+        return authService.switchTenant(principal.userId(), request);
     }
 }

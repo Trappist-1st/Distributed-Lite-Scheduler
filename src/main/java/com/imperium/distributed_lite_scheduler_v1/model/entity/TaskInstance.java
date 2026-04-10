@@ -95,7 +95,7 @@ public class TaskInstance {
     private Integer retryCount;
     
     /**
-     * 版本号（乐观锁）
+     * 版本号（乐观锁）  这个太妙了，乐观锁可以防止并发修改导致的数据不一致问题，在分布式系统中非常有用。
      */
     @Version
     private Integer version;

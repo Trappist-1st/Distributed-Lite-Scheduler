@@ -1,9 +1,13 @@
 package com.imperium.distributed_lite_scheduler_v1.service;
 
 import com.imperium.distributed_lite_scheduler_v1.model.dto.LoginResponse;
+import com.imperium.distributed_lite_scheduler_v1.model.dto.LoginTenantItem;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.RegisterRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.RegisterResponse;
+import com.imperium.distributed_lite_scheduler_v1.model.dto.SwitchTenantRequest;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
+
+import java.util.List;
 
 /**
  * 认证相关能力（登录、令牌、会话等）。不继承 {@code IService<User>}，避免与「用户资料/成员关系」的 CRUD 服务职责混淆。
@@ -16,4 +20,11 @@ public interface AuthService {
     Result<LoginResponse> login(String username, String password);
 
     Result<RegisterResponse> register(RegisterRequest request);
+
+    List<LoginTenantItem> loadLoginTenants(Long userId);
+
+    /**
+     * 切换当前租户上下文：校验成员关系与租户状态后，签发 tenant-scoped access token。
+     */
+    Result<LoginResponse> switchTenant(Long userId, SwitchTenantRequest request);
 }

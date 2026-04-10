@@ -298,6 +298,22 @@ CREATE TABLE `execution_log` (
     KEY `idx_log_time` (`log_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='执行日志表';
 
+-- 5.1.1 任务状态流转审计表
+DROP TABLE IF EXISTS `task_status_change_log`;
+CREATE TABLE `task_status_change_log` (
+    `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '审计ID',
+    `task_instance_id` BIGINT UNSIGNED NOT NULL COMMENT '任务实例ID',
+    `from_status` VARCHAR(20) NOT NULL COMMENT '原状态',
+    `to_status` VARCHAR(20) NOT NULL COMMENT '目标状态',
+    `trigger_source` VARCHAR(20) NOT NULL COMMENT '触发来源：SCHEDULER/WORKER/SYSTEM/API',
+    `reason` VARCHAR(500) NULL COMMENT '状态变更原因',
+    `operator_user_id` BIGINT UNSIGNED NULL COMMENT '操作人ID（系统触发可为空）',
+    `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    PRIMARY KEY (`id`),
+    KEY `idx_task_instance_created` (`task_instance_id`, `created_at`),
+    KEY `idx_created_at` (`created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='任务状态流转审计表';
+
 -- 5.2 告警规则表
 DROP TABLE IF EXISTS `alert_rule`;
 CREATE TABLE `alert_rule` (
@@ -740,4 +756,4 @@ DELIMITER ;
 -- ============================================================================
 
 SELECT '数据库初始化完成！' AS message;
-SELECT '共创建14个表、5个视图、3个存储过程、2个触发器' AS summary;
+SELECT '共创建15个表、5个视图、3个存储过程、2个触发器' AS summary;

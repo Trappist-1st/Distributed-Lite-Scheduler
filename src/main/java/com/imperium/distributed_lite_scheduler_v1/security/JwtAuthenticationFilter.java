@@ -56,8 +56,17 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         try {
             Claims claims = jwtTokenProvider.parseClaims(token);
             Long userId = Long.parseLong(claims.getSubject());
-            String username = claims.get("username", String.class);
-            JwtUserPrincipal principal = new JwtUserPrincipal(userId, username != null ? username : "");
+            String username = claims.get(JwtTokenProvider.CLAIM_USERNAME, String.class);
+            if (username == null) {
+                username = "";
+            }
+            Object tenantIdObj = claims.get(JwtTokenProvider.CLAIM_TENANT_ID);
+            Long tenantId = tenantIdObj == null ? null : ((Number) tenantIdObj).longValue();
+            String tenantCode = claims.get(JwtTokenProvider.CLAIM_TENANT_CODE, String.class);
+            String tenantRole = claims.get(JwtTokenProvider.CLAIM_TENANT_ROLE, String.class);
+            JwtUserPrincipal principal = tenantId == null
+                    ? new JwtUserPrincipal(userId, username)
+                    : new JwtUserPrincipal(userId, username, tenantId, tenantCode, tenantRole);
             UsernamePasswordAuthenticationToken authentication =
                     new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities());
             authentication.setDetails(new org.springframework.security.web.authentication.WebAuthenticationDetailsSource().buildDetails(request));
