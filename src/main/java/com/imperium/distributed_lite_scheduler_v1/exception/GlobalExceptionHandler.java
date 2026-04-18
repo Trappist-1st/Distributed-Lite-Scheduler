@@ -25,4 +25,14 @@ public class GlobalExceptionHandler {
     public Result<Void> handleBodyMissing(HttpMessageNotReadableException ex) {
         return Result.failure(ResultCode.BAD_REQUEST, "请求体格式错误或不能为空");
     }
+
+    @ExceptionHandler(QuotaExceededException.class)
+    public Result<Void> handleQuotaExceeded(QuotaExceededException ex) {
+        return Result.failure(ResultCode.BAD_REQUEST, ex.getMessage());
+    }
+
+    @ExceptionHandler(ResourceQuotaInvariantException.class)
+    public Result<Void> handleQuotaInvariant(ResourceQuotaInvariantException ex) {
+        return Result.failure(ResultCode.INTERNAL_ERROR, ex.getMessage());
+    }
 }

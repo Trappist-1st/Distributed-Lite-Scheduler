@@ -57,7 +57,7 @@ public class TenantServiceImpl extends ServiceImpl<TenantMapper, Tenant> impleme
         if (!login.isSuccess()) {
             return Result.failure(login.getCode(), login.getMessage());
         }
-        com.imperium.distributed_lite_scheduler_v1.security.JwtUserPrincipal principal = login.getData();
+        JwtUserPrincipal principal = login.getData();
 
         //2.根据request创建一个新的Tenant对象（应该会需要拷贝一些属性），然后将它放到数据库里
         String tenantCode = request.tenantCode().trim().toLowerCase(Locale.ROOT);
