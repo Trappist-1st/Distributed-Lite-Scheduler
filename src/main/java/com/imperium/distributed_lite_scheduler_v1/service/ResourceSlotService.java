@@ -14,9 +14,12 @@ import java.util.List;
  */
 public interface ResourceSlotService {
 
+    // 预留任务所需资源并返回预留流水信息。
     Result<ReserveResourceResponse> reserve(ReserveResourceRequest request);
 
+    // 按预留流水释放资源槽位并回收配额。
     Result<Void> release(ReleaseResourceRequest request);
 
+    // 分页或按条件查询资源使用流水记录。
     Result<List<ResourceUsage>> listUsage(ListResourceUsageRequest request);
 }

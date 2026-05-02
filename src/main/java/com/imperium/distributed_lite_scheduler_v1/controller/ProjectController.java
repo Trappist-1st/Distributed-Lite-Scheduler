@@ -2,14 +2,13 @@ package com.imperium.distributed_lite_scheduler_v1.controller;
 
 import com.imperium.distributed_lite_scheduler_v1.model.dto.CreateProjectRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.ListProjectsRequest;
+import com.imperium.distributed_lite_scheduler_v1.model.dto.PageResponse;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.UpdateProjectRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.Project;
 import com.imperium.distributed_lite_scheduler_v1.service.ProjectService;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.*;
-
-import java.util.List;
 
 @RestController
 @RequestMapping("/api/project")
@@ -36,7 +35,7 @@ public class ProjectController {
      *
      */
     @GetMapping("/list")
-    public Result<List<Project>> listProjects(@ModelAttribute @Valid ListProjectsRequest request) {
+    public Result<PageResponse<Project>> listProjects(@ModelAttribute @Valid ListProjectsRequest request) {
         return projectService.listProjects(request);
     }
 

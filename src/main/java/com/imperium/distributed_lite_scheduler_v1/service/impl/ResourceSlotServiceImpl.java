@@ -211,6 +211,7 @@ public class ResourceSlotServiceImpl implements ResourceSlotService {
         resourceQuotaService.releaseForReserve(tenantId, cpu, mem, gpu);
     }
 
+    //这个方法的核心逻辑是：找到符合条件的资源占用记录，验证权限和状态，然后更新状态为 RELEASED，并回补资源槽位和租户配额。
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Result<Void> release(ReleaseResourceRequest request) {

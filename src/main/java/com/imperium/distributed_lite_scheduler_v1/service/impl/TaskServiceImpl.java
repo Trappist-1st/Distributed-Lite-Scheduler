@@ -92,7 +92,7 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
         task.setRetryTimes(request.retryTimes() != null ? request.retryTimes() : 0);
         task.setRetryInterval(request.retryInterval() != null ? request.retryInterval() : 0);
         task.setPriority(request.priority() != null ? request.priority() : 5);
-        task.setResourceRequire(StringUtils.hasText(request.resourceRequire()) ? request.resourceRequire().trim() : null);
+        task.setResourceRequirement(StringUtils.hasText(request.resourceRequire()) ? request.resourceRequire().trim() : null);
         task.setAlertOnFailure(request.alertOnFailure() != null ? request.alertOnFailure() : 0);
         task.setAlertOnTimeout(request.alertOnTimeout() != null ? request.alertOnTimeout() : 0);
         task.setDescription(StringUtils.hasText(request.description()) ? request.description().trim() : null);
@@ -265,7 +265,7 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
             task.setPriority(request.priority());
         }
         if (request.resourceRequire() != null) {
-            task.setResourceRequire(StringUtils.hasText(request.resourceRequire()) ? request.resourceRequire().trim() : null);
+            task.setResourceRequirement(StringUtils.hasText(request.resourceRequire()) ? request.resourceRequire().trim() : null);
         }
         if (request.alertOnFailure() != null) {
             task.setAlertOnFailure(request.alertOnFailure());
@@ -383,7 +383,7 @@ public class TaskServiceImpl extends ServiceImpl<TaskMapper, Task> implements Ta
             task.setRetryTimes(item.retryTimes() != null ? item.retryTimes() : 0);
             task.setRetryInterval(item.retryInterval() != null ? item.retryInterval() : 0);
             task.setPriority(item.priority() != null ? item.priority() : 5);
-            task.setResourceRequire(StringUtils.hasText(item.resourceRequire()) ? item.resourceRequire().trim() : null);
+            task.setResourceRequirement(StringUtils.hasText(item.resourceRequire()) ? item.resourceRequire().trim() : null);
             task.setAlertOnFailure(item.alertOnFailure() != null ? item.alertOnFailure() : 0);
             task.setAlertOnTimeout(item.alertOnTimeout() != null ? item.alertOnTimeout() : 0);
             task.setDescription(StringUtils.hasText(item.description()) ? item.description().trim() : null);

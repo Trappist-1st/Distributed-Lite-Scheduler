@@ -18,11 +18,16 @@ public class TaskInstance {
      */
     @TableId(value = "id", type = IdType.AUTO)
     private Long id;
-    
+
     /**
      * 任务定义ID
      */
     private Long taskId;
+
+    /**
+     * 所属租户ID
+     */
+    private Long tenantId;
     
     /**
      * 所属工作流实例ID（NULL表示独立任务）
@@ -40,11 +45,6 @@ public class TaskInstance {
     private String triggerType;
     
     /**
-     * 触发用户ID（手动触发时）
-     */
-    private Long triggerUserId;
-    
-    /**
      * 状态：PENDING/RUNNING/SUCCESS/FAILED/CANCELLED/TIMEOUT
      */
     private String status;
@@ -53,6 +53,31 @@ public class TaskInstance {
      * 优先级
      */
     private Integer priority;
+
+    /**
+     * 资源需求（JSON快照）
+     */
+    private String resourceRequirement;
+
+    /**
+     * 执行器配置（JSON快照）
+     */
+    private String executorConfig;
+
+    /**
+     * 任务参数（JSON快照）
+     */
+    private String parameters;
+
+    /**
+     * 提交用户ID
+     */
+    private Long submitUserId;
+
+    /**
+     * 提交时间
+     */
+    private LocalDateTime submitTime;
     
     /**
      * 分配的资源节点ID

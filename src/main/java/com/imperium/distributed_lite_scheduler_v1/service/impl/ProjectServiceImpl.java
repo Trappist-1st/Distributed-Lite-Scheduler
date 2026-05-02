@@ -1,10 +1,13 @@
 package com.imperium.distributed_lite_scheduler_v1.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.imperium.distributed_lite_scheduler_v1.mapper.ProjectMapper;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.CreateProjectRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.ListProjectsRequest;
+import com.imperium.distributed_lite_scheduler_v1.model.dto.PageResponse;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.UpdateProjectRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.Project;
 import com.imperium.distributed_lite_scheduler_v1.security.TenantAccessGuard;
@@ -14,8 +17,6 @@ import com.imperium.distributed_lite_scheduler_v1.utils.ResultCode;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Set;
 
 @Service
@@ -81,7 +82,7 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     }
 
     @Override
-    public Result<List<Project>> listProjects(ListProjectsRequest request) {
+    public Result<PageResponse<Project>> listProjects(ListProjectsRequest request) {
         // 列表查询要求：已登录 + 已切租户 + 至少是该租户成员（含 GUEST）。
         Result<TenantAccessGuard.AccessContext> access = tenantAccessGuard.requireTenantMember(Set.of(), "");
         if (!access.isSuccess()) {
@@ -89,22 +90,21 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         }
         Long tenantId = access.getData().principal().tenantId();
 
-        int page = request.page();
-        int size = request.size();
-        int offset = (page - 1) * size;
+        int page = Math.max(request.page(), 1);
+        int size = Math.min(request.size(), 100);
+        Page<Project> pageParam = new Page<>(page, size);
         LambdaQueryWrapper<Project> qw = new LambdaQueryWrapper<Project>()
                 .eq(Project::getTenantId, tenantId)
                 .eq(Project::getDeleted, NOT_DELETED)
-                .orderByDesc(Project::getCreatedAt)
-                .last("LIMIT " + offset + ", " + size);
+                .orderByDesc(Project::getCreatedAt);
         if (StringUtils.hasText(request.keyword())) {
             String keyword = request.keyword().trim();
             qw.and(w -> w.like(Project::getProjectName, keyword)
                     .or()
                     .like(Project::getProjectCode, keyword));
         }
-        List<Project> projects = baseMapper.selectList(qw);
-        return Result.success(projects != null ? projects : new ArrayList<>());
+        IPage<Project> pageResult = baseMapper.selectPage(pageParam, qw);
+        return Result.success(new PageResponse<>(pageResult.getRecords(), pageResult.getTotal()));
     }
 
     @Override

@@ -77,7 +77,7 @@ public class Task {
     /**
      * 资源需求（JSON）
      */
-    private String resourceRequire;
+    private String resourceRequirement;
     
     /**
      * 失败时告警：0-否，1-是
