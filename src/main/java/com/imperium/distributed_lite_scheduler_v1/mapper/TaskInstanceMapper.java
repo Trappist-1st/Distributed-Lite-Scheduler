@@ -109,5 +109,21 @@ public interface TaskInstanceMapper extends BaseMapper<TaskInstance> {
     List<Long> selectPendingTaskIdsByPriority(@Param("limit") int limit,
                                               @Param("priorityWeight") double priorityWeight,
                                               @Param("agingWeight") double agingWeight);
+
+    /**
+     * 查询已超时的 RUNNING 任务（timeout_seconds 来自 task 定义）。
+     */
+    @Select({
+            "SELECT ti.* FROM task_instance ti ",
+            "INNER JOIN task t ON t.id = ti.task_id ",
+            "WHERE ti.status = 'RUNNING' ",
+            "  AND ti.start_time IS NOT NULL ",
+            "  AND t.timeout_seconds IS NOT NULL ",
+            "  AND t.timeout_seconds > 0 ",
+            "  AND TIMESTAMPDIFF(SECOND, ti.start_time, NOW()) > t.timeout_seconds ",
+            "ORDER BY ti.start_time ASC ",
+            "LIMIT #{limit}"
+    })
+    List<TaskInstance> selectTimedOutRunningTasks(@Param("limit") int limit);
 }
 

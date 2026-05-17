@@ -43,4 +43,7 @@ public class TaskSubmitRequest {
     private String taskType;
     private String executorConfig;
     private String resourceRequirement;
+
+    /** 工作流实例 ID（工作流编排提交时由引擎填充） */
+    private Long workflowInstanceId;
 }

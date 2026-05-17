@@ -22,4 +22,9 @@ public interface ResourceSlotService {
 
     // 分页或按条件查询资源使用流水记录。
     Result<List<ResourceUsage>> listUsage(ListResourceUsageRequest request);
+
+    /**
+     * 系统内部：任务终态后释放资源占用（无租户 JWT，供执行器/守护线程调用）。
+     */
+    void releaseForTaskInstanceSystem(Long taskInstanceId, String reason);
 }

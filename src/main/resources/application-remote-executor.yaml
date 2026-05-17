@@ -1,0 +1,9 @@
+# 启用远程 Worker 模式：spring.profiles.active 包含 remote-executor
+task:
+  executor:
+    mode: remote
+    worker-api-token: ${WORKER_API_TOKEN:dev-worker-token}
+
+internal:
+  api:
+    token: ${INTERNAL_API_TOKEN:dev-internal-token}

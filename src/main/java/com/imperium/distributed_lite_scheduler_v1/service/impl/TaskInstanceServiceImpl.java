@@ -2,6 +2,7 @@ package com.imperium.distributed_lite_scheduler_v1.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskInstanceMapper;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskMapper;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskStatusChangeLogMapper;
@@ -10,8 +11,12 @@ import com.imperium.distributed_lite_scheduler_v1.model.entity.Task;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.TaskInstance;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.TaskStatusChangeLog;
 import com.imperium.distributed_lite_scheduler_v1.service.TaskInstanceService;
+import com.imperium.distributed_lite_scheduler_v1.service.executor.completion.TaskInstanceTerminalHandler;
+import com.imperium.distributed_lite_scheduler_v1.service.workflow.stream.TaskCompletionEventPublisher;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import com.imperium.distributed_lite_scheduler_v1.utils.ResultCode;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -23,8 +28,9 @@ import java.util.Map;
 import java.util.Set;
 
 @Service
+@Slf4j
 public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, TaskInstance> implements TaskInstanceService {
-
+    
     private static final String STATUS_PENDING = "PENDING";
     private static final String STATUS_RUNNING = "RUNNING";
     private static final String STATUS_SUCCESS = "SUCCESS";
@@ -47,6 +53,15 @@ public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, Tas
 
     private final TaskMapper taskMapper;
     private final TaskStatusChangeLogMapper taskStatusChangeLogMapper;
+
+    @Autowired
+    private TaskCompletionEventPublisher taskCompletionEventPublisher;
+
+    @Autowired
+    private TaskInstanceTerminalHandler taskInstanceTerminalHandler;
+    
+    @Autowired
+    private ObjectMapper objectMapper;
 
     public TaskInstanceServiceImpl(TaskMapper taskMapper, TaskStatusChangeLogMapper taskStatusChangeLogMapper) {
         this.taskMapper = taskMapper;
@@ -75,6 +90,23 @@ public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, Tas
         }
         String currentStatus = normalizeStatus(current.getStatus());
         if (!fromStatus.equals(currentStatus)) {
+            if (currentStatus.equals(toStatus) && TERMINAL_STATUSES.contains(currentStatus)) {
+                return Result.success(current);
+            }
+            if (TERMINAL_STATUSES.contains(currentStatus)
+                    && isWorkerTrigger(request.triggerSource())) {
+                log.debug(
+                        "忽略迟到 Worker 回调 taskInstanceId={} current={} requested={}",
+                        taskInstanceId,
+                        currentStatus,
+                        toStatus);
+                return Result.success(current);
+            }
+            if (TERMINAL_STATUSES.contains(currentStatus)) {
+                return Result.failure(
+                        ResultCode.CONFLICT,
+                        "任务已处于终态 " + currentStatus + "，无法流转为 " + toStatus);
+            }
             return Result.failure(ResultCode.CONFLICT, "当前状态不匹配，期望 " + fromStatus + "，实际 " + currentStatus);
         }
 
@@ -149,6 +181,13 @@ public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, Tas
         persistStatusChangeLog(taskInstanceId, fromStatus, toStatus, request);
 
         TaskInstance latest = baseMapper.selectById(taskInstanceId);
+        
+        // 如果转换到终止状态，发布事件到 Redis Stream（异步，不阻塞返回）
+        if (TERMINAL_STATUSES.contains(toStatus)) {
+            publishTaskCompletionEvent(latest);
+            taskInstanceTerminalHandler.afterTerminal(latest, toStatus);
+        }
+        
         return Result.success(latest);
     }
 
@@ -193,6 +232,21 @@ public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, Tas
     private static boolean canTransition(String from, String to) {
         Set<String> allowed = ALLOWED_TRANSITIONS.get(from);
         return allowed != null && allowed.contains(to);
+    }
+
+    private static boolean isWorkerTrigger(String triggerSource) {
+        return triggerSource != null && "WORKER".equalsIgnoreCase(triggerSource.trim());
+    }
+
+    /**
+     * 发布任务完成事件到 Redis Stream
+     * 
+     * 这个事件会被 TaskCompletionStreamListener 消费，驱动 DAG 工作流继续执行
+     * 
+     * @param taskInstance 已转换到终止状态的任务实例
+     */
+    private void publishTaskCompletionEvent(TaskInstance taskInstance) {
+        taskCompletionEventPublisher.publish(taskInstance);
     }
 }
 

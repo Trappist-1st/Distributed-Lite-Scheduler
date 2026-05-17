@@ -1,7 +1,7 @@
 package com.imperium.distributed_lite_scheduler_v1.service.scheduler.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatuses;
+import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatus;
 import com.imperium.distributed_lite_scheduler_v1.mapper.ResourceNodeMapper;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskInstanceMapper;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.QuotaCheckResponse;
@@ -14,6 +14,7 @@ import com.imperium.distributed_lite_scheduler_v1.model.entity.ResourceNode;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.TaskInstance;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceQuotaService;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceSlotService;
+import com.imperium.distributed_lite_scheduler_v1.service.executor.TaskDispatchService;
 import com.imperium.distributed_lite_scheduler_v1.service.scheduler.PrioritySchedulerService;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -45,6 +46,7 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
     private final ResourceSlotService resourceSlotService;
     private final ResourceQuotaService resourceQuotaService;
     private final RedissonClient redissonClient;
+    private final TaskDispatchService taskDispatchService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     //使用volatile关键字是保证有序性和可见性，确保并发环境下对isLeader的修改能被其他线程及时看到，避免多个实例同时认为自己是Leader。
@@ -54,12 +56,14 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
                                         ResourceNodeMapper resourceNodeMapper,
                                         ResourceSlotService resourceSlotService,
                                         ResourceQuotaService resourceQuotaService,
-                                        RedissonClient redissonClient) {
+                                        RedissonClient redissonClient,
+                                        TaskDispatchService taskDispatchService) {
         this.taskInstanceMapper = taskInstanceMapper;
         this.resourceNodeMapper = resourceNodeMapper;
         this.resourceSlotService = resourceSlotService;
         this.resourceQuotaService = resourceQuotaService;
         this.redissonClient = redissonClient;
+        this.taskDispatchService = taskDispatchService;
     }
 
     @Override
@@ -229,7 +233,7 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
                 log.warn("任务不存在，跳过调度 taskId={}", taskInstance.getId());
                 return false;
             }
-            if (!TaskInstanceStatuses.PENDING.equals(latest.getStatus())) {
+            if (!TaskInstanceStatus.PENDING.getCode().equals(latest.getStatus())) {
                 log.debug("任务状态非PENDING，跳过 taskId={} status={}", latest.getId(), latest.getStatus());
                 return false;
             }
@@ -263,8 +267,8 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
             LocalDateTime now = LocalDateTime.now();
             int updated = taskInstanceMapper.updateStatusWithVersion(
                     latest.getId(),
-                    TaskInstanceStatuses.PENDING,
-                    TaskInstanceStatuses.RUNNING,
+                    TaskInstanceStatus.PENDING.getCode(),
+                    TaskInstanceStatus.RUNNING.getCode(),
                     latest.getVersion() == null ? 0 : latest.getVersion(),
                     selectedNode.getId(),
                     now,
@@ -379,15 +383,12 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
         }
     }
 
-    //TODO: 由于执行器接口和实现尚未完成，这里先用一个简单的占位方法模拟提交执行器的过程。
-    // 实际实现时，这部分逻辑可能会比较复杂，涉及到调用远程执行器服务、处理网络异常、重试机制等。
     private boolean submitToExecutor(TaskInstance task, ResourceNode node) {
-        log.info("优先级任务已进入RUNNING并绑定节点，执行器提交占位 taskId={} nodeId={}", task.getId(), node.getId());
-        return true;
+        return taskDispatchService.dispatch(task, node);
     }
 
     private void rollbackAfterDispatchFailure(TaskInstance task, Long reservedUsageId) {
-        task.setStatus(TaskInstanceStatuses.PENDING);
+        task.setStatus(TaskInstanceStatus.PENDING.getCode());
         task.setResourceNodeId(null);
         task.setStartTime(null);
         task.setScheduledTime(null);

@@ -1,7 +1,7 @@
 package com.imperium.distributed_lite_scheduler_v1.service.scheduler.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatuses;
+import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatus;
 import com.imperium.distributed_lite_scheduler_v1.mapper.ResourceNodeMapper;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskInstanceMapper;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.QuotaCheckResponse;
@@ -13,6 +13,7 @@ import com.imperium.distributed_lite_scheduler_v1.model.entity.ResourceNode;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.TaskInstance;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceQuotaService;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceSlotService;
+import com.imperium.distributed_lite_scheduler_v1.service.executor.TaskDispatchService;
 import com.imperium.distributed_lite_scheduler_v1.service.scheduler.FifoSchedulerService;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,7 +26,6 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -45,6 +45,7 @@ public class FifoSchedulerServiceImpl implements FifoSchedulerService {
     private final ResourceSlotService resourceSlotService;
     private final ResourceQuotaService resourceQuotaService;
     private final RedissonClient redissonClient;
+    private final TaskDispatchService taskDispatchService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     //这里使用volatile是因为isLeader可能会被多个线程访问和修改，volatile可以保证线程之间的可见性和有序性，
@@ -55,12 +56,14 @@ public class FifoSchedulerServiceImpl implements FifoSchedulerService {
                                     ResourceNodeMapper resourceNodeMapper,
                                     ResourceSlotService resourceSlotService,
                                     ResourceQuotaService resourceQuotaService,
-                                    RedissonClient redissonClient) {
+                                    RedissonClient redissonClient,
+                                    TaskDispatchService taskDispatchService) {
         this.taskInstanceMapper = taskInstanceMapper;
         this.resourceNodeMapper = resourceNodeMapper;
         this.resourceSlotService = resourceSlotService;
         this.resourceQuotaService = resourceQuotaService;
         this.redissonClient = redissonClient;
+        this.taskDispatchService = taskDispatchService;
     }
 
     //FIFO调度主循环
@@ -152,7 +155,7 @@ public class FifoSchedulerServiceImpl implements FifoSchedulerService {
                 log.warn("任务不存在，跳过调度 taskId={}", task.getId());
                 return false;
             }
-            if (!TaskInstanceStatuses.PENDING.equals(latest.getStatus())) {
+            if (!TaskInstanceStatus.PENDING.matches(latest.getStatus())) {
                 log.debug("任务状态非PENDING，跳过 taskId={} status={}", latest.getId(), latest.getStatus());
                 return false;
             }
@@ -177,8 +180,8 @@ public class FifoSchedulerServiceImpl implements FifoSchedulerService {
             LocalDateTime now = LocalDateTime.now();
             int updated = taskInstanceMapper.updateStatusWithVersion(
                     latest.getId(),
-                    TaskInstanceStatuses.PENDING,
-                    TaskInstanceStatuses.RUNNING,
+                    TaskInstanceStatus.PENDING.getCode(),
+                    TaskInstanceStatus.RUNNING.getCode(),
                     latest.getVersion() == null ? 0 : latest.getVersion(),
                     selectedNode.getId(),
                     now,
@@ -313,14 +316,12 @@ public class FifoSchedulerServiceImpl implements FifoSchedulerService {
     }
 
     private boolean submitToExecutor(TaskInstance task, ResourceNode node) {
-        // P3-2 当前阶段仅完成调度状态流转，执行器集成在后续阶段接入。
-        log.info("任务已进入RUNNING并绑定节点，执行器提交占位 taskId={} nodeId={}", task.getId(), node.getId());
-        return true;
+        return taskDispatchService.dispatch(task, node);
     }
 
     //这里是在调度过程中如果提交执行器失败了，需要回滚之前的状态更新和资源预留，确保系统状态的一致性和资源的正确释放。
     private void rollbackAfterDispatchFailure(TaskInstance task, Long reservedUsageId) {
-        task.setStatus(TaskInstanceStatuses.PENDING);
+        task.setStatus(TaskInstanceStatus.PENDING.getCode());
         task.setResourceNodeId(null);
         task.setStartTime(null);
         task.setScheduledTime(null);

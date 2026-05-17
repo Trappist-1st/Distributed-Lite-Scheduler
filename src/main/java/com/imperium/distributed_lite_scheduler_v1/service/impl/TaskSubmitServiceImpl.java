@@ -1,7 +1,7 @@
 package com.imperium.distributed_lite_scheduler_v1.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatuses;
+import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatus;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskInstanceMapper;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskMapper;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.BatchTaskSubmitRequest;
@@ -18,6 +18,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.MDC;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.BeanUtils;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -67,15 +68,26 @@ public class TaskSubmitServiceImpl implements TaskSubmitService {
     public Result<TaskSubmitResponse> submitTask(TaskSubmitRequest request) {
         try {
             Long taskId = request.getTaskId();
-            
-            // 从安全上下文提取提交身份与链路信息。
-            JwtUserPrincipal principal = (JwtUserPrincipal) SecurityContextHolder.getContext().getAuthentication().getPrincipal();
-            Long tenantId = principal.tenantId();
-            Long submitUserId = principal.userId();
+
+            Long tenantId;
+            Long submitUserId;
             String traceId = MDC.get("traceId");
-            
-            if (tenantId == null) {
-                return Result.failure(404, "租户信息不存在，请检查令牌");
+
+            if (request.getWorkflowInstanceId() != null) {
+                if (request.getTenantId() == null) {
+                    return Result.failure(400, "工作流任务提交缺少 tenantId");
+                }
+                tenantId = request.getTenantId();
+                submitUserId = request.getSubmitUserId();
+            } else {
+                JwtUserPrincipal principal =
+                        (JwtUserPrincipal)
+                                SecurityContextHolder.getContext().getAuthentication().getPrincipal();
+                tenantId = principal.tenantId();
+                submitUserId = principal.userId();
+                if (tenantId == null) {
+                    return Result.failure(404, "租户信息不存在，请检查令牌");
+                }
             }
             
             Task task = taskMapper.selectOne(new LambdaQueryWrapper<Task>()
@@ -92,17 +104,26 @@ public class TaskSubmitServiceImpl implements TaskSubmitService {
             request.setTraceId(traceId);
             request.setTaskInstanceId(snowflake.nextId());
             request.setSubmitTime(LocalDateTime.now());
-            
-            // 优先级取值顺序：请求参数 > 任务定义 > 系统默认。
-            if (request.getPriority() == null) {
-                request.setPriority(task.getPriority() != null ? task.getPriority() : DEFAULT_PRIORITY);
+
+            // 先拷贝任务定义快照字段，再恢复用户/工作流覆盖字段。
+            Integer submittedPriority = request.getPriority();
+            String submittedExecutorConfig = request.getExecutorConfig();
+            String submittedResourceRequirement = request.getResourceRequirement();
+            BeanUtils.copyProperties(task, request);
+
+            if (org.springframework.util.StringUtils.hasText(submittedExecutorConfig)) {
+                request.setExecutorConfig(submittedExecutorConfig);
             }
-            
-            // 任务定义快照字段，保证实例执行与定义变更解耦。
-            request.setTaskName(task.getTaskName());
-            request.setTaskType(task.getTaskType());
-            request.setExecutorConfig(task.getExecutorConfig());
-            request.setResourceRequirement(task.getResourceRequirement());
+            if (org.springframework.util.StringUtils.hasText(submittedResourceRequirement)) {
+                request.setResourceRequirement(submittedResourceRequirement);
+            }
+
+            // 优先级取值顺序：请求参数 > 任务定义 > 系统默认。
+            if (submittedPriority != null) {
+                request.setPriority(submittedPriority);
+            } else if (request.getPriority() == null) {
+                request.setPriority(DEFAULT_PRIORITY);
+            }
             
             boolean isSubmitted = taskSubmitQueue.offer(request, OFFER_TIMEOUT_MS, TimeUnit.MILLISECONDS);
             if (!isSubmitted) {
@@ -114,7 +135,7 @@ public class TaskSubmitServiceImpl implements TaskSubmitService {
 
             TaskSubmitResponse response = TaskSubmitResponse.builder()
                     .taskInstanceId(request.getTaskInstanceId())
-                    .status(TaskInstanceStatuses.PENDING)
+                    .status(TaskInstanceStatus.PENDING.getCode())
                     .estimatedStartTime(Instant.now())
                     .build();
             return Result.success(response);
@@ -208,15 +229,20 @@ public class TaskSubmitServiceImpl implements TaskSubmitService {
 
     private TaskInstance toTaskInstance(TaskSubmitRequest request) {
         TaskInstance taskInstance = new TaskInstance();
-        
+
+        BeanUtils.copyProperties(request, taskInstance,
+                "taskInstanceId", "parameters", "traceId", "taskName", "taskType");
+
         taskInstance.setId(request.getTaskInstanceId());
-        taskInstance.setTaskId(request.getTaskId());
-        taskInstance.setTenantId(request.getTenantId());
-        taskInstance.setTriggerType("API");
-        taskInstance.setStatus(TaskInstanceStatuses.PENDING);
-        taskInstance.setPriority(request.getPriority());
-        taskInstance.setResourceRequirement(request.getResourceRequirement());
-        taskInstance.setExecutorConfig(request.getExecutorConfig());
+        if (request.getWorkflowInstanceId() != null) {
+            taskInstance.setWorkflowInstanceId(request.getWorkflowInstanceId());
+            taskInstance.setTriggerType("WORKFLOW");
+        } else {
+            taskInstance.setTriggerType("API");
+        }
+        taskInstance.setStatus(TaskInstanceStatus.PENDING.getCode());
+        taskInstance.setRetryCount(0);
+        taskInstance.setVersion(0);
         
         try {
             if (request.getParameters() != null && !request.getParameters().isEmpty()) {
@@ -227,12 +253,7 @@ public class TaskSubmitServiceImpl implements TaskSubmitService {
             log.error("参数序列化失败 taskInstanceId={}", request.getTaskInstanceId(), e);
             taskInstance.setParameters("{}");
         }
-        
-        taskInstance.setSubmitUserId(request.getSubmitUserId());
-        taskInstance.setSubmitTime(request.getSubmitTime());
-        taskInstance.setRetryCount(0);
-        taskInstance.setVersion(0);
-        
+
         return taskInstance;
     }
 

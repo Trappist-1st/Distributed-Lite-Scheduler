@@ -1,0 +1,33 @@
+spring:
+  application:
+    name: distributed-lite-worker
+
+server:
+  port: ${WORKER_SERVER_PORT:9090}
+
+worker:
+  api:
+    token: ${WORKER_API_TOKEN:dev-worker-token}
+  scheduler:
+    base-url: ${SCHEDULER_BASE_URL:http://localhost:8080}
+  node:
+    name: ${WORKER_NODE_NAME:worker-local}
+    host: ${WORKER_NODE_HOST:127.0.0.1}
+    port: ${WORKER_NODE_PORT:9090}
+    type: CPU
+    total-cpu: ${WORKER_TOTAL_CPU:8}
+    total-memory-mb: ${WORKER_TOTAL_MEMORY_MB:16384}
+    total-gpu: 0
+    worker-endpoint: ${WORKER_ENDPOINT:}
+  executor:
+    core-pool-size: 4
+    max-pool-size: 16
+    queue-capacity: 200
+    work-dir: ${WORKER_EXECUTOR_WORK_DIR:}
+    output-max-chars: 8192
+  heartbeat-interval-seconds: ${WORKER_HEARTBEAT_INTERVAL_SECONDS:30}
+  registration-enabled: ${WORKER_REGISTRATION_ENABLED:true}
+
+logging:
+  level:
+    com.imperium.distributed_lite_worker: INFO

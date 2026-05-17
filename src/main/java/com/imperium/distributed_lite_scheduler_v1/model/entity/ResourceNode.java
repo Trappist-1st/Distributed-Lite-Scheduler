@@ -33,6 +33,11 @@ public class ResourceNode {
      * 节点端口
      */
     private Integer nodePort;
+
+    /**
+     * Worker HTTP 根地址（如 http://10.0.0.5:9090）；为空时由 nodeHost:nodePort 推导
+     */
+    private String workerEndpoint;
     
     /**
      * 节点类型：CPU/GPU/MIXED

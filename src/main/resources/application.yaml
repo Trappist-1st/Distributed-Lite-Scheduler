@@ -29,6 +29,13 @@ spring:
       include-message: ALWAYS
       include-binding-errors: ALWAYS
 
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DATABASE:0}
+
 server:
   port: ${SERVER_PORT:8080}
   servlet:
@@ -47,6 +54,25 @@ jwt:
 internal:
   api:
     token: ${INTERNAL_API_TOKEN:}
+
+# 任务执行器：mode=in-process（本机）| remote（远程 Worker）
+task:
+  executor:
+    enabled: ${TASK_EXECUTOR_ENABLED:true}
+    mode: ${TASK_EXECUTOR_MODE:in-process}
+    scheduler-public-base-url: ${SCHEDULER_PUBLIC_BASE_URL:http://localhost:8080}
+    worker-dispatch-path: /api/worker/runs
+    worker-connect-timeout-ms: ${WORKER_CONNECT_TIMEOUT_MS:5000}
+    worker-read-timeout-ms: ${WORKER_READ_TIMEOUT_MS:15000}
+    worker-api-token: ${WORKER_API_TOKEN:}
+    core-pool-size: ${TASK_EXECUTOR_CORE_POOL_SIZE:4}
+    max-pool-size: ${TASK_EXECUTOR_MAX_POOL_SIZE:16}
+    queue-capacity: ${TASK_EXECUTOR_QUEUE_CAPACITY:200}
+    work-dir: ${TASK_EXECUTOR_WORK_DIR:}
+    output-max-chars: ${TASK_EXECUTOR_OUTPUT_MAX_CHARS:8192}
+    timeout-watch-enabled: ${TASK_TIMEOUT_WATCH_ENABLED:true}
+    timeout-scan-interval-ms: ${TASK_TIMEOUT_SCAN_INTERVAL_MS:30000}
+    timeout-scan-batch-size: ${TASK_TIMEOUT_SCAN_BATCH_SIZE:100}
 
 ---
 spring:

@@ -2,7 +2,7 @@ package com.imperium.distributed_lite_scheduler_v1.service.scheduler.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.imperium.distributed_lite_scheduler_v1.constant.NodeType;
-import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatuses;
+import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatus;
 import com.imperium.distributed_lite_scheduler_v1.mapper.ResourceNodeMapper;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskInstanceMapper;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.QuotaCheckResponse;
@@ -15,6 +15,7 @@ import com.imperium.distributed_lite_scheduler_v1.model.entity.ResourceNode;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.TaskInstance;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceQuotaService;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceSlotService;
+import com.imperium.distributed_lite_scheduler_v1.service.executor.TaskDispatchService;
 import com.imperium.distributed_lite_scheduler_v1.service.scheduler.ResourceAwareSchedulerService;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -56,6 +57,7 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
     private final ResourceSlotService resourceSlotService;
     private final ResourceQuotaService resourceQuotaService;
     private final RedissonClient redissonClient;
+    private final TaskDispatchService taskDispatchService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     private volatile boolean isLeader = false;
@@ -64,12 +66,14 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
                                              ResourceNodeMapper resourceNodeMapper,
                                              ResourceSlotService resourceSlotService,
                                              ResourceQuotaService resourceQuotaService,
-                                             RedissonClient redissonClient) {
+                                             RedissonClient redissonClient,
+                                             TaskDispatchService taskDispatchService) {
         this.taskInstanceMapper = taskInstanceMapper;
         this.resourceNodeMapper = resourceNodeMapper;
         this.resourceSlotService = resourceSlotService;
         this.resourceQuotaService = resourceQuotaService;
         this.redissonClient = redissonClient;
+        this.taskDispatchService = taskDispatchService;
     }
 
     /**
@@ -158,7 +162,7 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
                     log.warn("任务不存在，跳过调度 taskId={}", taskInstance.getId());
                     return false;
                 }
-                if (!TaskInstanceStatuses.PENDING.equals(latest.getStatus())) {
+                if (!TaskInstanceStatus.PENDING.getCode().equals(latest.getStatus())) {
                     log.debug("任务状态非PENDING，跳过 taskId={} status={}", latest.getId(), latest.getStatus());
                     return false;
                 }
@@ -212,7 +216,7 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
                     log.warn("任务不存在 taskId={}", taskInstance.getId());
                     return false;
                 }
-                if (!TaskInstanceStatuses.PENDING.equals(latest.getStatus())) {
+                if (!TaskInstanceStatus.PENDING.getCode().equals(latest.getStatus())) {
                     log.debug("任务状态非PENDING taskId={} status={}", latest.getId(), latest.getStatus());
                     return false;
                 }
@@ -257,8 +261,8 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
             LocalDateTime now = LocalDateTime.now();
             int updated = taskInstanceMapper.updateStatusWithVersion(
                     latest.getId(),
-                    TaskInstanceStatuses.PENDING,
-                    TaskInstanceStatuses.RUNNING,
+                    TaskInstanceStatus.PENDING.getCode(),
+                    TaskInstanceStatus.RUNNING.getCode(),
                     latest.getVersion() == null ? 0 : latest.getVersion(),
                     node.getId(),
                     now,
@@ -286,7 +290,7 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
     }
 
     private List<TaskWithPriority> buildWithPriorityFromOrderedIds(List<Long> ids) {
-        List<TaskInstance> rows = taskInstanceMapper.selectBatchIds(ids);
+        List<TaskInstance> rows = taskInstanceMapper.selectByIds(ids);
         if (rows == null || rows.isEmpty()) {
             return Collections.emptyList();
         }
@@ -303,7 +307,7 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
                 continue;
             }
             TaskInstance ti = byId.get(id);
-            if (ti == null || !TaskInstanceStatuses.PENDING.equals(ti.getStatus())) {
+            if (ti == null || !TaskInstanceStatus.PENDING.getCode().equals(ti.getStatus())) {
                 continue;
             }
             TaskWithPriority twp = new TaskWithPriority();
@@ -388,12 +392,11 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
     }
 
     private boolean submitToExecutor(TaskInstance task, ResourceNode node) {
-        log.info("资源感知任务已进入RUNNING并绑定节点，执行器提交占位 taskId={} nodeId={}", task.getId(), node.getId());
-        return true;
+        return taskDispatchService.dispatch(task, node);
     }
 
     private void rollbackAfterDispatchFailure(TaskInstance task, Long reservedUsageId) {
-        task.setStatus(TaskInstanceStatuses.PENDING);
+        task.setStatus(TaskInstanceStatus.PENDING.getCode());
         task.setResourceNodeId(null);
         task.setStartTime(null);
         task.setScheduledTime(null);

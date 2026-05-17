@@ -1,1236 +1,357 @@
-# P4-4: 条件分支支持设计稿（进阶特性）
+# P4-4: 条件分支支持设计稿（与当前实现对齐）
+
+> **文档状态**：已与 `Distributed Lite Scheduler_V1` 当前代码结构校对。原稿中基于「同进程 CountDownLatch 按层阻塞」的执行引擎示例**不再适用**，已替换为与 **Redis Stream 事件驱动** 一致的集成说明。
 
 ## 1. 文档目标
 
-本文档详细设计工作流的条件分支功能，在基础DAG执行基础上增加动态路由能力，解决以下问题：
+在基础 DAG 执行之上增加**运行时分支选择**能力：
 
-- 如何根据任务执行结果动态决定后续执行路径
-- 如何表达和解析条件表达式
-- 如何处理条件不满足的任务（跳过）
-- 如何实现复杂的业务逻辑（if-else、switch等）
+- 如何根据前置任务结果（状态、输出、上下文变量）决定下游是否投递执行；
+- 如何表达并解析条件（建议 SpEL）；
+- 分支未命中时如何保证编排**不被 PENDING 卡死**（通常标记 `SKIPPED`）；
+- 与现有 **分层拓扑 + Stream 驱动下一层** 的语义如何衔接。
 
-**核心价值**：让工作流具备智能决策能力，从"静态DAG"升级为"动态工作流"，是工作流引擎的"大脑升级"。
-
----
-
-## 2. 条件分支核心概念
-
-### 2.1 什么是条件分支
-
-**定义**：根据前置任务的执行结果（状态、输出、变量等）动态决定是否执行后续任务。
-
-**示例场景：数据质量检查工作流**
-```
-┌─────────────────────────────────────────────┐
-│        数据质量检查工作流                     │
-├─────────────────────────────────────────────┤
-│                                             │
-│    ┌──────────┐                            │
-│    │ 数据验证  │                            │
-│    └─────┬────┘                            │
-│          │                                 │
-│     ┌────▼─────┐                           │
-│     │ 质量评分  │                           │
-│     └─────┬────┘                           │
-│           │                                │
-│    ┌──────▼──────┐                         │
-│    │  分数 >= 90? │                         │
-│    └──┬──────┬───┘                         │
-│       │ YES  │ NO                          │
-│   ┌───▼──┐ ┌▼────────┐                    │
-│   │ 直接 │ │ 人工审核 │                    │
-│   │ 导入 │ │         │                    │
-│   └──────┘ └─────────┘                    │
-│                                             │
-└─────────────────────────────────────────────┘
-```
-
-**传统DAG vs 条件分支**：
-```
-传统DAG：
-  A → B → C → D
-  所有任务都会执行
-
-条件分支：
-  A → B → [条件判断]
-           ├─ 条件满足 → C
-           └─ 条件不满足 → D
-  只执行满足条件的分支
-```
-
-### 2.2 为什么需要条件分支
-
-**场景1：数据质量检查**
-```
-数据验证通过 → 自动导入
-数据验证失败 → 人工审核 + 告警
-```
-
-**场景2：模型训练**
-```
-模型精度 >= 0.95 → 自动部署
-模型精度 < 0.95  → 重新训练 + 参数调优
-```
-
-**场景3：业务审批流程**
-```
-金额 <= 1000    → 自动审批
-金额 > 1000     → 主管审批
-金额 > 10000    → 总监审批
-```
-
-**场景4：A/B测试**
-```
-用户ID % 2 == 0 → 运行版本A
-用户ID % 2 == 1 → 运行版本B
-```
-
-**价值**：
-- ✅ **智能决策**：根据实际情况动态调整执行路径
-- ✅ **资源节省**：跳过不必要的任务
-- ✅ **业务灵活性**：满足复杂业务逻辑
-- ✅ **可维护性**：逻辑清晰，易于理解
+**价值**：在工作流仍为**有向无环图（静态 DAG）**的前提下，对部分边引入**运行时布尔门控**，路径由执行结果塑形。
 
 ---
 
-## 3. 条件表达式设计
+## 2. 与当前仓库架构的对齐说明（必读）
 
-### 3.1 表达式语法（SpEL）
+### 2.1 依赖与拓扑存在哪里？
 
-**选择SpEL（Spring Expression Language）的原因**：
-- ✅ Spring原生支持，无需额外依赖
-- ✅ 语法丰富，支持复杂表达式
-- ✅ 类型安全
-- ✅ 易于扩展
+| 事项 | 实际项目 |
+|------|----------|
+| 依赖存储 | **`workflow.dag_json`**（JSON），**没有**独立的 `task_dependency` 数据库表。 |
+| Java 模型 | `WorkflowDAG`：`tasks` + `dependencies`；边模型为 **`WorkflowDependency`**（`from` / `to` / **`condition`** 可选）。 |
+| 拓扑分层 | **`WorkflowExecutionServiceImpl`**：`buildGraph` → Kahn **`topologicalSort`** → **`WorkflowExecutionPlan`**（每层 `TaskLayer` + `TaskExecutionNode`）。当前 **`buildGraph` 不解析 `condition`**，所有依赖边仍参与拓扑，用于保证仍是 DAG 与分层。 |
 
-**基础语法**：
-```java
-// 访问任务输出
-${task_a.output.score}
+### 2.2 运行时谁在推进「下一波任务」？
 
-// 比较运算
-${task_a.output.score >= 90}
+| 组件 | 路径（包名节选） | 职责 |
+|------|------------------|------|
+| 首轮投递 | `WorkflowExecutorImpl` | 校验实例 `PENDING` → `RUNNING`，**投递第 0 层**仍为 `PENDING` 的节点到 `TaskSubmitService`。 |
+| 完成事件 | `TaskCompletionStreamListener` + **`TaskCompletionStreamHandler`** | 消费 Redis Stream 中的任务完成事件，更新 **`WorkflowTaskInstance`**，在满足「**当前层全部终态**」时 **`submitLayerTasks(nextLayer)`** 或收口工作流。 |
+| 暂停后恢复 | `WorkflowControlServiceImpl` + `WorkflowExecutor#resumeWorkflowInstanceAsync` | 将仍为 `PENDING` 的最浅层再次投递。 |
 
-// 逻辑运算
-${task_a.status == 'SUCCESS' and task_b.output.count > 100}
+**结论**：条件分支的实现应挂在 **「决定是否对本层或下一层某一节点投递 / 或直接 SKIPPED」** 的逻辑上，而不是替换为设计稿早期版本的 **`WorkflowExecutorWithCondition` + `CountDownLatch`** 伪代码。
 
-// 字符串操作
-${task_a.output.result.contains('error')}
+### 2.3 执行计划快照里有什么？缺什么？
 
-// 算术运算
-${task_a.output.value * 2 + 10}
+- 实例创建时，`WorkflowInstance.execution_plan` 保存 **`WorkflowExecutionPlan` 序列化 JSON**。
+- **当前快照未包含完整的 `dependencies` 列表**，运行时若仅依赖 `execution_plan`，无法还原「指向某 `to` 节点的边及 `condition`」。
+- **实现 P4-4 前建议二选一（或同时做）**：
+  1. **扩展 `WorkflowExecutionPlan`**：增加 `List<WorkflowDependency> dependencies`（或与之一致结构），在 `doBuildExecutionPlan` 时从 `WorkflowDAG` 拷贝；**推荐**，Stream 处理只读实例快照即可。
+  2. 在 Stream 中按 `workflowId` **回表读取 `workflow.dagJson` 再解析**（注意定义变更与实例快照版本一致性问题）。
 
-// 三元运算
-${task_a.output.score >= 90 ? 'pass' : 'fail'}
+### 2.4 分层推进的硬约束（条件分支相关）
 
-// 访问上下文变量
-${workflow.context.userId}
-```
+`TaskCompletionStreamHandler#checkAndSubmitNextLayer` 在**当前层**所有任务均为终态（`SUCCESS` / `FAILED` / `SKIPPED`）后，才会投递 **`currentLayer + 1`**。
 
-### 3.2 表达式上下文
+因此：
 
-**可用变量**：
-```java
-public class ConditionContext {
-    // 任务执行结果
-    Map<String, TaskResult> tasks;
-    
-    // 工作流上下文
-    Map<String, Object> context;
-    
-    // 系统变量
-    Map<String, Object> system;
-}
+- **互斥分支**上未被选中的节点**不能长期保持 `PENDING`**，否则整层无法结束 → **死锁**。
+- 典型策略：在打开下一层（或在首次投递该层前）对「本层每个待决策节点」求值：满足则保持 `PENDING` 并提交调度；不满足则 **`SKIPPED`**（并视需要扣减/保持实例级计数规则与产品一致）。
 
-public class TaskResult {
-    String status;           // 任务状态: SUCCESS, FAILED
-    int exitCode;            // 退出码
-    Map<String, Object> output;  // 任务输出（JSON解析）
-    long durationSeconds;    // 执行时长
-}
-```
+### 2.5 任务输出与上下文
 
-**示例上下文**：
-```json
-{
-  "tasks": {
-    "data_validation": {
-      "status": "SUCCESS",
-      "exitCode": 0,
-      "output": {
-        "validRecords": 9500,
-        "invalidRecords": 500,
-        "score": 95.0,
-        "errors": []
-      },
-      "durationSeconds": 120
-    }
-  },
-  "context": {
-    "userId": 12345,
-    "environment": "production",
-    "batchId": "20260502"
-  },
-  "system": {
-    "currentTime": "2026-05-02T10:30:00",
-    "workflowInstanceId": 456
-  }
-}
-```
+- **任务侧**：`WorkflowTaskInstance.output` / `exitCode` / `status` 等可作为条件上下文来源；若用 JSON 输出，需**约定**由执行器或任务把结构化结果写入 `output` 字段（或你们统一的结果通道）。
+- **实例级 `context`（如 userId、batchId）**：原设计稿中的 `loadWorkflowContext` 依赖「实例上存 JSON」。**当前 `WorkflowInstance` 若无该字段**，需在 **P4-4 实现阶段**增加字段（如 `context_json`），或在 **创建实例 API** 中接受参数并落库；否则 SpEL 中 `context.*` 无法持久可用。
 
-**表达式示例**：
-```java
-// 检查数据质量分数
-${tasks.data_validation.output.score >= 90}
+### 2.6 失败策略
 
-// 检查任务是否成功
-${tasks.data_validation.status == 'SUCCESS'}
-
-// 检查错误数量
-${tasks.data_validation.output.invalidRecords < 100}
-
-// 组合条件
-${tasks.data_validation.status == 'SUCCESS' 
-  and tasks.data_validation.output.score >= 90}
-
-// 检查环境
-${context.environment == 'production'}
-
-// 用户分组（A/B测试）
-${context.userId % 2 == 0}
-```
+- 实例上有 **`failureStrategy`**（如 `stop_on_failure` / `continue_on_failure`）字段。
+- **当前 Stream 路径对「是否继续投递下一层」与失败策略的耦合需单独盘点**；P4-4 实现时应与产品一致：**条件分支**与**失败停流**正交，避免重复语义。
 
 ---
 
-## 4. 数据模型扩展
+## 3. 条件分支概念（业务侧）
 
-### 4.1 表结构扩展
+### 3.1 定义
 
-#### workflow_task_dependency表增加条件字段
-```sql
-ALTER TABLE task_dependency
-ADD COLUMN condition VARCHAR(500) COMMENT '执行条件(SpEL表达式)';
+根据前置任务执行结果（状态、输出、变量）**动态决定是否对下游边「放行」**；不放行则下游对应节点应进入 **`SKIPPED`**（或你们定义的其他终态），而不是删除节点。
 
--- 示例数据
-INSERT INTO task_dependency (workflow_id, from_task_name, to_task_name, condition)
-VALUES 
-  (1, 'data_validation', 'auto_import', 
-   '${tasks.data_validation.output.score >= 90}'),
-  
-  (1, 'data_validation', 'manual_review', 
-   '${tasks.data_validation.output.score < 90}');
-```
+### 3.2 与传统 DAG 的关系
 
-### 4.2 DAG JSON格式扩展
+- **拓扑排序**仍基于**完整静态 DAG**（含所有可能走的边），保证无环与分层合理。
+- **运行时**仅决定某些边上**是否执行** `to` 节点；不执行则 `to` 对应实例行需尽快进入终态，避免阻塞层完成条件。
+
+---
+
+## 4. 条件表达式设计
+
+### 4.1 技术选型：Spring SpEL
+
+- 与 Spring 技术栈一致，便于在服务端求值。
+- 需在实现中注意：**安全与超时**（禁用危险调用、限制求值时间），避免用户表达式拖垮消费线程。
+
+### 4.2 语法说明：不要混用 `${...}` 与 SpEL
+
+早期文档示例使用 **`${tasks.xxx}`**，更像配置占位符风格。**Spring SpEL 原生**通常写作：
+
+- 使用 **`#root`**、**`#tasks`** 等，或
+- 将 `tasks` / `context` / `system` 注册为 **EvaluationContext 的 variable**，在表达式里写 **`#tasks['data_validation'].output['score'] >= 90`**。
+
+**建议**：在项目内**统一一种写法**并固定文档；若保留 `${...}` 字符串，实现层应**剥离前缀**或**映射为 SpEL**（实现细节，不在此展开）。
+
+### 4.3 表达式上下文（建议模型）
+
+与业务相关的三类数据：
+
+| 变量名 | 含义 |
+|--------|------|
+| `tasks` | `Map<nodeName, TaskResult>`：已结束任务的状态、退出码、解析后的 `output` Map、耗时等。 |
+| `context` | 工作流实例级参数（需落库或可从创建请求注入）。 |
+| `system` | 只读系统字段，如 `workflowInstanceId`、`currentTime`。 |
+
+`TaskResult` 建议字段：`status`（与 `TaskInstanceStatus` 存库一致的大写）、`exitCode`、`output`（`Map<String,Object>`）、`durationSeconds`。
+
+---
+
+## 5. 数据模型（与代码一致）
+
+### 5.1 DAG JSON（`workflow.dag_json`）
+
+- **任务节点**使用 **`nodeName`** 作为依赖引用键（见 `WorkflowTask`），**不是**早期示例里的 `name`。
+- **依赖**使用 `WorkflowDependency`：`from` / `to` 对应 **`nodeName`**；**`condition` 可选**，空或 null 表示**不额外门控**（仍受拓扑与上游完成约束）。
+
+示例（字段名与项目一致，条件表达式仅为示意，需按你们选定的 SpEL 风格改写）：
 
 ```json
 {
   "version": "1.0",
   "tasks": [
     {
-      "name": "data_validation",
-      "displayName": "数据验证",
-      "type": "python",
-      "script": "validate.py"
+      "nodeName": "data_validation",
+      "taskId": 1001,
+      "displayName": "数据验证"
     },
     {
-      "name": "auto_import",
-      "displayName": "自动导入",
-      "type": "shell",
-      "command": "python import.py"
+      "nodeName": "auto_import",
+      "taskId": 1002,
+      "displayName": "自动导入"
     },
     {
-      "name": "manual_review",
-      "displayName": "人工审核",
-      "type": "shell",
-      "command": "python notify_review.py"
+      "nodeName": "manual_review",
+      "taskId": 1003,
+      "displayName": "人工审核"
     }
   ],
   "dependencies": [
     {
       "from": "data_validation",
       "to": "auto_import",
-      "condition": "${tasks.data_validation.output.score >= 90}"
+      "condition": "#tasks['data_validation'].output['score'] >= 90"
     },
     {
       "from": "data_validation",
       "to": "manual_review",
-      "condition": "${tasks.data_validation.output.score < 90}"
+      "condition": "#tasks['data_validation'].output['score'] < 90"
     }
   ]
 }
 ```
 
-### 4.3 Entity扩展
+### 5.2 数据库
 
-```java
-@Data
-public class WorkflowDependency {
-    private String from;        // 上游任务
-    private String to;          // 下游任务
-    private String condition;   // 执行条件（可选）
-}
-```
+- **无需**按旧稿 `ALTER TABLE task_dependency` 修改；依赖在 DAG JSON 中。
+- 若增加实例级上下文：在 **`workflow_instance`** 上增加列（如 `context_json`）或在实现文档中单独立项。
+
+### 5.3 执行计划快照扩展（实现项）
+
+在 **`WorkflowExecutionPlan`** 中增加依赖列表（或与 `WorkflowDependency` 等价结构），并在 **`WorkflowExecutionServiceImpl#doBuildExecutionPlan`** 中赋值，使 **`TaskCompletionStreamHandler`** 仅依赖实例快照即可做条件判断，避免运行时再读工作流定义导致版本漂移。
 
 ---
 
-## 5. 核心实现
+## 6. 运行时集成设计（替代原 §5.3 伪代码）
 
-### 5.1 条件表达式解析器
+### 6.1 禁止方案（与仓库不符）
 
-```java
-@Service
-@Slf4j
-public class ConditionEvaluator {
-    
-    private final SpelExpressionParser parser = new SpelExpressionParser();
-    private final StandardEvaluationContext evaluationContext = new StandardEvaluationContext();
-    
-    /**
-     * 评估条件表达式
-     * 
-     * @param conditionExpr 条件表达式（SpEL）
-     * @param context 上下文数据
-     * @return 条件是否满足
-     */
-    public boolean evaluate(String conditionExpr, ConditionContext context) {
-        if (conditionExpr == null || conditionExpr.isEmpty()) {
-            // 没有条件，默认执行
-            return true;
-        }
-        
-        try {
-            // 设置上下文变量
-            evaluationContext.setVariable("tasks", context.getTasks());
-            evaluationContext.setVariable("context", context.getContext());
-            evaluationContext.setVariable("system", context.getSystem());
-            
-            // 解析并执行表达式
-            Expression expression = parser.parseExpression(conditionExpr);
-            Object result = expression.getValue(evaluationContext);
-            
-            // 转换为布尔值
-            if (result instanceof Boolean) {
-                return (Boolean) result;
-            } else {
-                log.warn("条件表达式返回非布尔值 expr={} result={}", conditionExpr, result);
-                return false;
-            }
-            
-        } catch (Exception e) {
-            log.error("条件表达式评估失败 expr={}", conditionExpr, e);
-            throw new RuntimeException("条件表达式评估失败: " + e.getMessage());
-        }
-    }
-    
-    /**
-     * 验证条件表达式语法
-     */
-    public void validate(String conditionExpr) {
-        if (conditionExpr == null || conditionExpr.isEmpty()) {
-            return;
-        }
-        
-        try {
-            parser.parseExpression(conditionExpr);
-            log.info("条件表达式语法验证通过 expr={}", conditionExpr);
-        } catch (Exception e) {
-            throw new IllegalArgumentException("条件表达式语法错误: " + e.getMessage());
-        }
-    }
-}
-```
+- **不要**采用「`WorkflowExecutorWithCondition` 继承 `WorkflowExecutor` + `CountDownLatch` 层内阻塞等待全部任务结束」的主流程；当前主流程为 **异步调度 + Stream 回调**。
 
-### 5.2 条件上下文构建
+### 6.2 推荐锚点
 
-```java
-@Service
-@Slf4j
-public class ConditionContextBuilder {
-    
-    @Autowired
-    private WorkflowTaskInstanceMapper taskInstanceMapper;
-    
-    @Autowired
-    private ObjectMapper objectMapper;
-    
-    /**
-     * 构建条件上下文
-     */
-    public ConditionContext buildContext(Long workflowInstanceId) {
-        ConditionContext context = new ConditionContext();
-        
-        // 1. 加载任务执行结果
-        Map<String, TaskResult> tasks = loadTaskResults(workflowInstanceId);
-        context.setTasks(tasks);
-        
-        // 2. 加载工作流上下文（用户传入的参数）
-        Map<String, Object> workflowContext = loadWorkflowContext(workflowInstanceId);
-        context.setContext(workflowContext);
-        
-        // 3. 设置系统变量
-        Map<String, Object> system = new HashMap<>();
-        system.put("currentTime", LocalDateTime.now());
-        system.put("workflowInstanceId", workflowInstanceId);
-        context.setSystem(system);
-        
-        return context;
-    }
-    
-    /**
-     * 加载任务执行结果
-     */
-    private Map<String, TaskResult> loadTaskResults(Long workflowInstanceId) {
-        List<WorkflowTaskInstance> taskInstances = 
-            taskInstanceMapper.selectByInstanceId(workflowInstanceId);
-        
-        Map<String, TaskResult> results = new HashMap<>();
-        
-        for (WorkflowTaskInstance task : taskInstances) {
-            // 只加载已完成的任务
-            if (task.getStatus() != TaskInstanceStatus.SUCCESS &&
-                task.getStatus() != TaskInstanceStatus.FAILED) {
-                continue;
-            }
-            
-            TaskResult result = new TaskResult();
-            result.setStatus(task.getStatus().name());
-            result.setExitCode(task.getExitCode() != null ? task.getExitCode() : -1);
-            result.setDurationSeconds(
-                task.getDurationSeconds() != null ? task.getDurationSeconds() : 0L
-            );
-            
-            // 解析任务输出（假设是JSON格式）
-            if (task.getOutput() != null && !task.getOutput().isEmpty()) {
-                try {
-                    Map<String, Object> output = 
-                        objectMapper.readValue(task.getOutput(), 
-                            new TypeReference<Map<String, Object>>() {});
-                    result.setOutput(output);
-                } catch (Exception e) {
-                    log.warn("解析任务输出失败 taskName={}", task.getTaskName(), e);
-                    result.setOutput(new HashMap<>());
-                }
-            } else {
-                result.setOutput(new HashMap<>());
-            }
-            
-            results.put(task.getTaskName(), result);
-        }
-        
-        return results;
-    }
-    
-    /**
-     * 加载工作流上下文
-     */
-    private Map<String, Object> loadWorkflowContext(Long workflowInstanceId) {
-        // 从工作流实例获取用户传入的上下文参数
-        // TODO: 实现工作流实例的context字段存储
-        return new HashMap<>();
-    }
-}
+1. **`TaskCompletionStreamHandler`**
+   - 在「当前层全部终态」之后、**投递 `nextLayer` 之前或之中**：
+     - 对 `nextLayer` 中每个 `WorkflowTaskInstance`，根据 **入边依赖 + `condition`** 决定是否 **提交** 或 **标记 `SKIPPED`**。
+   - 对 **同一层内** 因条件晚于其他任务才「可判定」的节点，需与产品约定是否允许；**最小实现**可先支持「条件仅出现在自上一层出发的边上，且该层所有前驱已终态」。
 
-/**
- * 条件上下文
- */
-@Data
-public class ConditionContext {
-    private Map<String, TaskResult> tasks;
-    private Map<String, Object> context;
-    private Map<String, Object> system;
-}
+2. **`WorkflowExecutorImpl`（首轮与 `resume`）**
+   - 在 **首次投递某层** 时，与 Stream 路径共用一套 **「过滤 + SKIPPED」** 逻辑，避免暂停恢复后出现与 Stream 不一致的行为。
 
-/**
- * 任务执行结果
- */
-@Data
-public class TaskResult {
-    private String status;
-    private Integer exitCode;
-    private Map<String, Object> output;
-    private Long durationSeconds;
-}
-```
+### 6.3 条件求值组件（建议拆分）
 
-### 5.3 工作流执行引擎集成
+| 组件 | 职责 |
+|------|------|
+| `ConditionEvaluator` | `evaluate(expr, EvaluationContext)`；无表达式或空白 → `true`。 |
+| `ConditionContextBuilder` | 给定 `workflowInstanceId`，组装 `tasks` / `context` / `system`。 |
 
-```java
-@Service
-@Slf4j
-public class WorkflowExecutorWithCondition extends WorkflowExecutor {
-    
-    @Autowired
-    private ConditionEvaluator conditionEvaluator;
-    
-    @Autowired
-    private ConditionContextBuilder contextBuilder;
-    
-    /**
-     * 执行一层任务（支持条件分支）
-     */
-    @Override
-    protected boolean executeLayer(WorkflowInstance instance, TaskLayer layer) 
-            throws Exception {
-        
-        List<WorkflowTaskInstance> taskInstances = 
-            workflowTaskInstanceMapper.selectByInstanceIdAndLayer(
-                instance.getId(), layer.getLayerIndex()
-            );
-        
-        if (taskInstances.isEmpty()) {
-            return true;
-        }
-        
-        // 构建条件上下文
-        ConditionContext conditionContext = contextBuilder.buildContext(instance.getId());
-        
-        CountDownLatch latch = new CountDownLatch(taskInstances.size());
-        AtomicBoolean layerSuccess = new AtomicBoolean(true);
-        
-        for (WorkflowTaskInstance taskInstance : taskInstances) {
-            executorService.submit(() -> {
-                try {
-                    // 检查任务是否应该执行（条件判断）
-                    if (shouldExecuteTask(taskInstance, conditionContext)) {
-                        boolean success = executeTask(instance, taskInstance);
-                        if (!success) {
-                            layerSuccess.set(false);
-                        }
-                    } else {
-                        // 条件不满足，跳过任务
-                        skipTask(taskInstance);
-                        log.info("任务条件不满足，跳过执行 taskName={}", taskInstance.getTaskName());
-                    }
-                } catch (Exception e) {
-                    log.error("任务执行异常 taskInstanceId={}", taskInstance.getId(), e);
-                    layerSuccess.set(false);
-                } finally {
-                    latch.countDown();
-                }
-            });
-        }
-        
-        latch.await();
-        
-        return layerSuccess.get();
-    }
-    
-    /**
-     * 判断任务是否应该执行
-     */
-    private boolean shouldExecuteTask(
-            WorkflowTaskInstance taskInstance, 
-            ConditionContext context) {
-        
-        // 获取任务的依赖关系和条件
-        List<WorkflowDependency> dependencies = 
-            getDependenciesToTask(taskInstance.getWorkflowInstanceId(), taskInstance.getTaskName());
-        
-        if (dependencies.isEmpty()) {
-            // 没有依赖，直接执行
-            return true;
-        }
-        
-        // 检查所有依赖的条件
-        for (WorkflowDependency dep : dependencies) {
-            String condition = dep.getCondition();
-            
-            if (condition == null || condition.isEmpty()) {
-                // 无条件依赖，检查上游任务是否成功
-                TaskResult upstreamResult = context.getTasks().get(dep.getFrom());
-                if (upstreamResult == null || !"SUCCESS".equals(upstreamResult.getStatus())) {
-                    log.info("上游任务未成功，跳过任务 task={} upstream={}", 
-                            taskInstance.getTaskName(), dep.getFrom());
-                    return false;
-                }
-            } else {
-                // 有条件依赖，评估条件
-                boolean conditionMet = conditionEvaluator.evaluate(condition, context);
-                if (!conditionMet) {
-                    log.info("条件不满足，跳过任务 task={} condition={}", 
-                            taskInstance.getTaskName(), condition);
-                    return false;
-                }
-            }
-        }
-        
-        return true;
-    }
-    
-    /**
-     * 跳过任务
-     */
-    private void skipTask(WorkflowTaskInstance taskInstance) {
-        taskInstance.setStatus(TaskInstanceStatus.SKIPPED);
-        taskInstance.setStartTime(LocalDateTime.now());
-        taskInstance.setEndTime(LocalDateTime.now());
-        taskInstance.setDurationSeconds(0);
-        workflowTaskInstanceMapper.updateById(taskInstance);
-        
-        // 更新工作流实例的跳过计数
-        workflowInstanceMapper.incrementSkippedTasks(taskInstance.getWorkflowInstanceId());
-    }
-    
-    /**
-     * 获取指向某个任务的所有依赖
-     */
-    private List<WorkflowDependency> getDependenciesToTask(Long workflowInstanceId, String taskName) {
-        // 从工作流定义中获取依赖关系
-        WorkflowInstance instance = workflowInstanceMapper.selectById(workflowInstanceId);
-        WorkflowExecutionPlan plan = parseExecutionPlan(instance.getExecutionPlan());
-        
-        // 从原始DAG获取依赖
-        // TODO: 在执行计划中保存依赖关系
-        return new ArrayList<>();
-    }
-}
-```
+**登记变量**：例如 `evaluationContext.setVariable("tasks", taskResultMap);` 等，与 §4.3 一致。
 
-### 5.4 任务输出标准化
+### 6.4 多前置（Join）与 SKIPPED 语义（需产品拍板）
 
-**为了支持条件判断，任务输出需要标准化为JSON格式**：
+- 若 `task_d` 依赖 `task_b` 与 `task_c`，其中一条分支因条件未被选中而为 **`SKIPPED`**，`task_d` 是否仍应执行？
+- 常见规则：**所有直接前驱必须终态**；`SKIPPED` 是否视为「满足依赖」需明确定义（AND/OR、是否要求至少一条 SUCCESS 等）。
+- **未定义前不要盲目实现**，否则与监控、`failed_tasks` 统计会不一致。
 
-```python
-# Python任务示例：数据验证
-import json
-import sys
+### 6.5 与工作流定义的校验
 
-def validate_data():
-    # 执行验证逻辑
-    total_records = 10000
-    valid_records = 9500
-    invalid_records = 500
-    score = (valid_records / total_records) * 100
-    
-    # 输出标准JSON格式
-    result = {
-        "validRecords": valid_records,
-        "invalidRecords": invalid_records,
-        "totalRecords": total_records,
-        "score": score,
-        "status": "completed",
-        "errors": []
-    }
-    
-    print(json.dumps(result))
-    
-    return 0 if score >= 90 else 1
+在 **`WorkflowServiceImpl` 创建/更新 DAG** 时，建议增加：
 
-if __name__ == "__main__":
-    sys.exit(validate_data())
-```
-
-```bash
-# Shell任务示例：模型训练
-#!/bin/bash
-
-# 训练模型
-python train.py
-
-# 评估模型
-accuracy=$(python evaluate.py | grep "accuracy" | awk '{print $2}')
-
-# 输出JSON
-echo "{\"accuracy\": $accuracy, \"modelPath\": \"/models/model_v1.pkl\"}"
-
-# 根据精度返回退出码
-if (( $(echo "$accuracy >= 0.95" | bc -l) )); then
-    exit 0
-else
-    exit 1
-fi
-```
+- 每条 `dependencies[].condition` 的 **语法校验**（可选用 SpEL `parseExpression`）；
+- **可选**：静态检查引用的 `nodeName`、`output` 路径无法解析时仅告警（弱校验）。
 
 ---
 
-## 6. API设计
+## 7. 任务输出标准化（仍建议保留）
 
-### 6.1 创建带条件分支的工作流
+为便于 `output` Map 参与条件，建议任务将**结构化结果**打印到约定通道并最终写入 `WorkflowTaskInstance.output`（JSON 字符串）。以下示例仅作说明，与具体执行器对接由调度/执行侧保证。
+
+**Python 示例（节选）**：将结果 JSON 打印到 stdout，由执行器采集写入 `output`。
+
+**Shell 示例（节选）**：`echo '{"accuracy":0.96}'` 等。
+
+（原稿 §5.4 完整示例可继续作为脚本侧参考，此处不重复占用篇幅。）
+
+---
+
+## 8. API 与前端（与当前 Controller 对齐）
+
+### 8.1 定义带条件的工作流
+
+实际创建请求体为 **`WorkflowCreateRequest`**，其中 **`dagJson` 为字符串**（内部是 `WorkflowDAG` JSON），不是嵌套对象字段。
 
 ```http
 POST /api/workflow
 Content-Type: application/json
+```
 
+```json
 {
-  "name": "数据质量检查工作流",
   "projectId": 100,
-  "dagJson": {
-    "tasks": [
-      {
-        "name": "data_validation",
-        "displayName": "数据验证",
-        "type": "python",
-        "script": "validate.py"
-      },
-      {
-        "name": "auto_import",
-        "displayName": "自动导入",
-        "type": "shell",
-        "command": "python import.py"
-      },
-      {
-        "name": "manual_review",
-        "displayName": "人工审核",
-        "type": "shell",
-        "command": "python notify.py"
-      }
-    ],
-    "dependencies": [
-      {
-        "from": "data_validation",
-        "to": "auto_import",
-        "condition": "${tasks.data_validation.output.score >= 90}"
-      },
-      {
-        "from": "data_validation",
-        "to": "manual_review",
-        "condition": "${tasks.data_validation.output.score < 90}"
-      }
-    ]
-  }
+  "workflowName": "数据质量检查工作流",
+  "dagJson": "{\"version\":\"1.0\",\"tasks\":[...],\"dependencies\":[...]}"
 }
 ```
 
-### 6.2 验证条件表达式
+### 8.2 运行实例
 
 ```http
-POST /api/workflow/condition/validate
-Content-Type: application/json
-
-{
-  "expression": "${tasks.data_validation.output.score >= 90}"
-}
-
-Response:
-{
-  "code": 200,
-  "data": {
-    "valid": true,
-    "message": "表达式语法正确"
-  }
-}
+POST /api/workflow/instance/execute
 ```
 
-### 6.3 测试条件表达式
+请求体为 **`WorkflowInstanceCreateRequest`**（`workflowId`、`failureStrategy`、`executeImmediately` 等）。若引入实例级 `context`，在此请求中扩展字段并与 §2.5 存储方案一致。
 
-```http
-POST /api/workflow/condition/evaluate
-Content-Type: application/json
+### 8.3 条件校验 / 调试 API
 
-{
-  "expression": "${tasks.data_validation.output.score >= 90}",
-  "context": {
-    "tasks": {
-      "data_validation": {
-        "status": "SUCCESS",
-        "output": {
-          "score": 95.0
-        }
-      }
-    }
-  }
-}
-
-Response:
-{
-  "code": 200,
-  "data": {
-    "result": true,
-    "message": "条件满足"
-  }
-}
-```
+原稿中的 `POST /api/workflow/condition/validate`、`/evaluate` **尚未在仓库中作为既定接口**；可作为 **P4-4 实施时的可选配套**，便于运营调试 SpEL。
 
 ---
 
-## 7. 高级特性
+## 9. 高级场景（保留思路，实现分阶段）
 
-### 7.1 多路分支（Switch-Case）
+### 9.1 多路分支（Switch）
 
-```json
-{
-  "dependencies": [
-    {
-      "from": "check_amount",
-      "to": "auto_approve",
-      "condition": "${tasks.check_amount.output.amount <= 1000}"
-    },
-    {
-      "from": "check_amount",
-      "to": "manager_approve",
-      "condition": "${tasks.check_amount.output.amount > 1000 and tasks.check_amount.output.amount <= 10000}"
-    },
-    {
-      "from": "check_amount",
-      "to": "director_approve",
-      "condition": "${tasks.check_amount.output.amount > 10000}"
-    }
-  ]
-}
-```
+多条边自同一 `from` 指向不同 `to`，各带**互斥**条件；需保证**至少一条**在运行时可命中或定义**默认边**，否则应显式失败/告警。
 
-### 7.2 条件组合（AND/OR）
+### 9.2 AND / OR 组合
 
-```json
-{
-  "dependencies": [
-    {
-      "from": "task_a",
-      "to": "task_c",
-      "condition": "${tasks.task_a.status == 'SUCCESS' and tasks.task_b.status == 'SUCCESS'}"
-    },
-    {
-      "from": "task_a",
-      "to": "task_d",
-      "condition": "${tasks.task_a.status == 'FAILED' or tasks.task_b.status == 'FAILED'}"
-    }
-  ]
-}
-```
+在**单条边**的 `condition` 内用 SpEL 组合；注意 `tasks` 中尚未运行的节点**不在 `TaskResult` 中**，避免 NPE。
 
-### 7.3 默认分支（Else）
+### 9.3 默认分支（Else）
 
-```json
-{
-  "dependencies": [
-    {
-      "from": "data_validation",
-      "to": "auto_import",
-      "condition": "${tasks.data_validation.output.score >= 90}"
-    },
-    {
-      "from": "data_validation",
-      "to": "manual_review",
-      "condition": "${tasks.data_validation.output.score < 90 or tasks.data_validation.status == 'FAILED'}"
-    }
-  ]
-}
-```
+可用「显式第二条边 + 宽条件」模拟；**不推荐**依赖「无 else 则自动执行」，避免语义歧义。
 
-### 7.4 循环控制（配合重试）
+### 9.4 循环 / `LoopConfig`
 
-```java
-// 任务重试直到成功或达到最大次数
-@Data
-public class WorkflowTask {
-    private String name;
-    private String type;
-    private String command;
-    
-    // 循环控制
-    private LoopConfig loopConfig;
-}
-
-@Data
-public class LoopConfig {
-    private int maxIterations;                // 最大迭代次数
-    private String continueCondition;         // 继续条件
-    private int intervalSeconds;              // 间隔时间
-}
-```
-
-```json
-{
-  "name": "retry_until_success",
-  "type": "shell",
-  "command": "python check_status.py",
-  "loopConfig": {
-    "maxIterations": 10,
-    "continueCondition": "${tasks.retry_until_success.output.ready == false}",
-    "intervalSeconds": 60
-  }
-}
-```
+原稿中 **`WorkflowTask.loopConfig` 在当前 `WorkflowTask` 实体中不存在**，属于**更远期**能力；与 P4-4 **条件边**解耦，单独立项。
 
 ---
 
-## 8. 监控与可视化
+## 10. 监控与可观测
 
-### 8.1 条件判断日志
-
-```java
-@Aspect
-@Component
-@Slf4j
-public class ConditionEvaluationAspect {
-    
-    @Around("@annotation(com.imperium.annotation.EvaluateCondition)")
-    public Object logConditionEvaluation(ProceedingJoinPoint pjp) throws Throwable {
-        String condition = getConditionExpression(pjp);
-        
-        log.info("开始评估条件 condition={}", condition);
-        
-        long start = System.currentTimeMillis();
-        Object result = pjp.proceed();
-        long elapsed = System.currentTimeMillis() - start;
-        
-        log.info("条件评估完成 condition={} result={} elapsed={}ms", 
-                condition, result, elapsed);
-        
-        return result;
-    }
-}
-```
-
-### 8.2 执行路径可视化
-
-```
-工作流实例执行路径：
-┌─────────────────────────────────────────┐
-│  实例ID: 456                             │
-│  工作流: 数据质量检查                     │
-├─────────────────────────────────────────┤
-│                                         │
-│  ✅ data_validation (Layer 0)           │
-│     └─ score: 95.0                      │
-│                                         │
-│  ✅ auto_import (Layer 1)               │
-│     └─ 条件满足: score >= 90            │
-│                                         │
-│  ⏭️ manual_review (Layer 1)             │
-│     └─ 条件不满足: score < 90 (跳过)    │
-│                                         │
-└─────────────────────────────────────────┘
-```
-
-### 8.3 分支覆盖率统计
-
-```java
-@Service
-public class WorkflowAnalyticsService {
-    
-    /**
-     * 统计分支覆盖率
-     */
-    public BranchCoverageReport analyzeBranchCoverage(Long workflowId) {
-        List<WorkflowInstance> instances = 
-            workflowInstanceMapper.selectByWorkflowId(workflowId);
-        
-        // 统计每个条件分支的执行次数
-        Map<String, Integer> branchExecutionCount = new HashMap<>();
-        
-        for (WorkflowInstance instance : instances) {
-            List<WorkflowTaskInstance> tasks = 
-                workflowTaskInstanceMapper.selectByInstanceId(instance.getId());
-            
-            for (WorkflowTaskInstance task : tasks) {
-                String key = task.getTaskName() + ":" + task.getStatus();
-                branchExecutionCount.merge(key, 1, Integer::sum);
-            }
-        }
-        
-        BranchCoverageReport report = new BranchCoverageReport();
-        report.setWorkflowId(workflowId);
-        report.setTotalInstances(instances.size());
-        report.setBranchStats(branchExecutionCount);
-        
-        return report;
-    }
-}
-```
-
-**输出示例**：
-```
-分支覆盖率报告：
-┌──────────────────────────────────────────┐
-│  工作流: 数据质量检查                      │
-│  总实例数: 100                            │
-├──────────────────────────────────────────┤
-│  auto_import:SUCCESS       → 85次 (85%)  │
-│  manual_review:SUCCESS     → 15次 (15%)  │
-│                                          │
-│  结论: 85%的数据质量合格，直接导入         │
-└──────────────────────────────────────────┘
-```
+- 条件求值：建议 **结构化日志**（`instanceId`、`nodeName`、`expression`、`result`、耗时）；避免在日志中打印过大 `output`。
+- **分支可视化**：可基于 `WorkflowTaskInstance` 的 `SKIPPED` / `SUCCESS` 与实例 `execution_plan` 展示「理论边」与「实际走过节点」。（`WorkflowInstanceMonitorController` 已有进度/时间线类接口，可迭代展示条件原因字段——需实现时扩展 VO。）
 
 ---
 
-## 9. 测试方案
+## 11. 测试建议
 
-### 9.1 单元测试
+| 类型 | 要点 |
+|------|------|
+| 单元测试 | `ConditionEvaluator` + 边界上下文（缺 key、output 非 JSON、表达式异常）。 |
+| 集成测试 | **异步**：`WorkflowExecutorImpl`/`Stream` 全链路，`await`/轮询直至实例终态；断言互斥两支一支 `SUCCESS` 一支 `SKIPPED`。 |
+| 回归 | `PAUSED`/`CANCELLED` 不打下一层、`resumeWorkflowInstanceAsync` 与条件过滤一致。 |
 
-```java
-@SpringBootTest
-public class ConditionEvaluatorTest {
-    
-    @Autowired
-    private ConditionEvaluator evaluator;
-    
-    @Test
-    public void testSimpleCondition() {
-        ConditionContext context = new ConditionContext();
-        
-        TaskResult taskA = new TaskResult();
-        taskA.setStatus("SUCCESS");
-        taskA.setOutput(Map.of("score", 95.0));
-        
-        context.setTasks(Map.of("task_a", taskA));
-        context.setContext(new HashMap<>());
-        context.setSystem(new HashMap<>());
-        
-        // 测试条件评估
-        boolean result = evaluator.evaluate(
-            "${tasks.task_a.output.score >= 90}", context
-        );
-        
-        assertTrue(result);
-    }
-    
-    @Test
-    public void testComplexCondition() {
-        ConditionContext context = buildTestContext();
-        
-        // AND条件
-        boolean result1 = evaluator.evaluate(
-            "${tasks.task_a.status == 'SUCCESS' and tasks.task_b.output.count > 100}", 
-            context
-        );
-        assertTrue(result1);
-        
-        // OR条件
-        boolean result2 = evaluator.evaluate(
-            "${tasks.task_a.status == 'FAILED' or tasks.task_b.output.count < 50}", 
-            context
-        );
-        assertFalse(result2);
-    }
-    
-    @Test
-    public void testInvalidExpression() {
-        ConditionContext context = buildTestContext();
-        
-        assertThrows(RuntimeException.class, () -> {
-            evaluator.evaluate("${invalid expression}", context);
-        });
-    }
-}
-```
-
-### 9.2 集成测试
-
-```java
-@SpringBootTest
-public class ConditionalWorkflowTest {
-    
-    @Autowired
-    private WorkflowInstanceService instanceService;
-    
-    @Autowired
-    private WorkflowExecutor executor;
-    
-    @Test
-    public void testConditionalBranch_ConditionMet() {
-        // 创建工作流实例（条件满足场景）
-        Long instanceId = createWorkflowWithHighScore();
-        
-        executor.executeWorkflowInstance(instanceId);
-        
-        // 验证自动导入任务被执行
-        WorkflowTaskInstance autoImport = 
-            workflowTaskInstanceMapper.selectByInstanceAndName(instanceId, "auto_import");
-        assertEquals(TaskInstanceStatus.SUCCESS, autoImport.getStatus());
-        
-        // 验证人工审核任务被跳过
-        WorkflowTaskInstance manualReview = 
-            workflowTaskInstanceMapper.selectByInstanceAndName(instanceId, "manual_review");
-        assertEquals(TaskInstanceStatus.SKIPPED, manualReview.getStatus());
-    }
-    
-    @Test
-    public void testConditionalBranch_ConditionNotMet() {
-        // 创建工作流实例（条件不满足场景）
-        Long instanceId = createWorkflowWithLowScore();
-        
-        executor.executeWorkflowInstance(instanceId);
-        
-        // 验证自动导入任务被跳过
-        WorkflowTaskInstance autoImport = 
-            workflowTaskInstanceMapper.selectByInstanceAndName(instanceId, "auto_import");
-        assertEquals(TaskInstanceStatus.SKIPPED, autoImport.getStatus());
-        
-        // 验证人工审核任务被执行
-        WorkflowTaskInstance manualReview = 
-            workflowTaskInstanceMapper.selectByInstanceAndName(instanceId, "manual_review");
-        assertEquals(TaskInstanceStatus.SUCCESS, manualReview.getStatus());
-    }
-}
-```
+原稿中单测里 `${tasks.task_a...}` 示例需在项目确定 SpEL 风格后改写。
 
 ---
 
-## 10. 性能优化
+## 12. 性能与FAQ（修订）
 
-### 10.1 条件表达式缓存
+### 12.1 性能
 
-```java
-@Service
-public class ConditionEvaluatorWithCache extends ConditionEvaluator {
-    
-    private final Cache<String, Expression> expressionCache = 
-        CacheBuilder.newBuilder()
-            .maximumSize(1000)
-            .expireAfterWrite(1, TimeUnit.HOURS)
-            .build();
-    
-    @Override
-    public boolean evaluate(String conditionExpr, ConditionContext context) {
-        if (conditionExpr == null || conditionExpr.isEmpty()) {
-            return true;
-        }
-        
-        try {
-            // 从缓存获取已解析的表达式
-            Expression expression = expressionCache.get(conditionExpr, () -> {
-                return parser.parseExpression(conditionExpr);
-            });
-            
-            // 设置上下文并执行
-            evaluationContext.setVariable("tasks", context.getTasks());
-            evaluationContext.setVariable("context", context.getContext());
-            evaluationContext.setVariable("system", context.getSystem());
-            
-            Object result = expression.getValue(evaluationContext);
-            return result instanceof Boolean ? (Boolean) result : false;
-            
-        } catch (Exception e) {
-            log.error("条件表达式评估失败 expr={}", conditionExpr, e);
-            throw new RuntimeException("条件表达式评估失败: " + e.getMessage());
-        }
-    }
-}
-```
+- 可对**解析后的 Expression**做缓存（key 为表达式字符串）；**上下文不可缓存**。
+- Stream 消费线程上求值应保持轻量；重计算应挪到异步任务或由任务本身产出结果字段。
 
-### 10.2 并行条件评估
+### 12.2 FAQ
 
-```java
-/**
- * 对同一层的多个条件并行评估
- */
-public Map<String, Boolean> evaluateBatch(
-        List<String> conditions, 
-        ConditionContext context) {
-    
-    return conditions.parallelStream()
-        .collect(Collectors.toMap(
-            cond -> cond,
-            cond -> evaluate(cond, context)
-        ));
-}
-```
+**Q：条件分支影响拓扑排序吗？**  
+**A：** 拓扑仍用**全集依赖边**。条件只影响**运行时是否执行 `to`**；不负责从拓扑里删边。
+
+**Q：为什么会出现死锁？**  
+**A：** 某节点应跳过但仍为 **`PENDING`**，导致该层永远不满足「全终态」。必须通过 **SKIPPED**（或等价终态）解决。
+
+**Q：原设计稿里的 `task_dependency` 表？**  
+**A：** 本仓库**不使用**该表；以 **`workflow.dag_json`** 为准。
+
+**Q：`executeWorkflowInstance` 会等整图跑完吗？**  
+**A：** **不会。** 当前设计为异步投递 + Redis Stream 驱动后续层；收口在 `TaskCompletionStreamHandler`（及失败路径）等处。
 
 ---
 
-## 11. 常见问题
+## 13. 后续优化方向（保留方向性）
 
-### Q1: 条件表达式如何调试？
-
-**答**：提供条件评估API
-```http
-POST /api/workflow/condition/debug
-{
-  "expression": "${tasks.task_a.output.score >= 90}",
-  "context": {...}
-}
-```
-
-返回详细的评估过程和中间变量值。
-
-### Q2: 如何处理条件表达式错误？
-
-**答**：
-1. 工作流创建时验证语法
-2. 执行时捕获异常，记录详细日志
-3. 默认策略：表达式错误 → 跳过任务
-
-### Q3: 条件分支会影响拓扑排序吗？
-
-**答**：不影响。拓扑排序基于依赖关系，条件分支只影响运行时的执行决策。
-
-### Q4: 如何实现"等待某个条件满足"的场景？
-
-**答**：使用循环配置 + 条件检查
-```json
-{
-  "loopConfig": {
-    "maxIterations": 10,
-    "continueCondition": "${tasks.check.output.ready == false}",
-    "intervalSeconds": 60
-  }
-}
-```
+- 注册 SpEL **自定义函数**（如租户日历、配额判断）；
+- 条件模板与可视化编辑器；
+- 分支覆盖率统计（基于实例与 `WorkflowTaskInstance` 聚合）。
 
 ---
 
-## 12. 后续优化方向
+## 14. 总结
 
-### 12.1 自定义函数
+| 维度 | 说明 |
+|------|------|
+| 模型 | `WorkflowDependency.condition` **已在代码中存在**；DAG 存 **`dag_json`**。 |
+| 缺口 | **`WorkflowExecutionPlan` 需携带依赖**，或运行时回读 DAG；实例 **context** 若要用需落库。 |
+| 集成 | 以 **`TaskCompletionStreamHandler`**（及 **`WorkflowExecutorImpl` 首投/恢复**）为唯一下推点；**禁止**沿用 CountDownLatch 主流程伪代码。 |
+| 风险 | **Join + SKIPPED 语义**、**失败策略与继续投递**、**SpEL 安全**。 |
 
-```java
-// 注册自定义函数
-evaluationContext.registerFunction("isWeekend", 
-    DateUtils.class.getDeclaredMethod("isWeekend", Date.class));
-
-// 使用自定义函数
-${#isWeekend(system.currentTime)}
-```
-
-### 12.2 条件模板
-
-```java
-// 预定义常用条件
-Map<String, String> conditionTemplates = Map.of(
-    "task_success", "${tasks.{taskName}.status == 'SUCCESS'}",
-    "score_high", "${tasks.{taskName}.output.score >= {threshold}}",
-    "is_production", "${context.environment == 'production'}"
-);
-```
-
-### 12.3 可视化条件编辑器
-
-```
-┌─────────────────────────────────────────┐
-│  条件表达式编辑器                        │
-├─────────────────────────────────────────┤
-│                                         │
-│  [任务] [task_a] [的输出] [score]       │
-│  [运算符] [>=]                          │
-│  [值] [90]                              │
-│                                         │
-│  预览: ${tasks.task_a.output.score >= 90}│
-│                                         │
-│  [验证] [测试] [保存]                    │
-└─────────────────────────────────────────┘
-```
+按上述与仓库对齐后，P4-4 可从「最小互斥二分支 + 计划快照带依赖 + Stream 内 SKIPPED」迭代上线，再扩展多路与 Join 规则。
 
 ---
 
-## 13. 总结
+## 附录 A：任务输出 JSON 示例（脚本侧）
 
-条件分支是工作流引擎的高级特性，价值：
+供条件 `#tasks['data_validation'].output['score']` 等解析使用；最终以执行器写入 `WorkflowTaskInstance.output` 的结果为准。
 
-✅ **智能决策**：根据运行时结果动态选择执行路径  
-✅ **业务灵活性**：满足复杂的业务逻辑需求  
-✅ **资源优化**：跳过不必要的任务，节省资源  
-✅ **可扩展性**：支持自定义函数和复杂表达式  
+**Python（节选）**
 
-**关键设计决策**：
-- 使用SpEL表达式（功能强大，易于扩展）
-- 标准化任务输出（JSON格式）
-- 条件上下文（tasks + context + system）
-- 表达式缓存（提升性能）
-- 跳过而非删除（保留执行轨迹）
+```python
+import json
+import sys
 
-**实际效果**：
-- 简单if-else：2个分支，1个被跳过
-- 多路switch：N个分支，只执行1个
-- 复杂业务：审批流程、A/B测试、智能路由
+result = {
+    "validRecords": 9500,
+    "invalidRecords": 500,
+    "score": 95.0
+}
+print(json.dumps(result))
+sys.exit(0)
+```
 
-**适用场景**：
-- ✅ 数据质量检查
-- ✅ 模型训练与部署
-- ✅ 业务审批流程
-- ✅ A/B测试
-- ✅ 智能告警
+**Shell（节选）**
 
-这个设计让工作流引擎从"静态DAG"升级为"智能工作流"，为企业级业务流程自动化提供了强大的决策能力。🚀
+```bash
+echo "{\"score\": 95}"
+exit 0
+```

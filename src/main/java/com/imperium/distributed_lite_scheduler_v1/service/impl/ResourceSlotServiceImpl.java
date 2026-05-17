@@ -50,7 +50,6 @@ public class ResourceSlotServiceImpl implements ResourceSlotService {
     private static final String SLOT_MEMORY = "MEMORY";
 
     private static final String USAGE_RESERVED = ResourceUsageStatuses.RESERVED;
-    private static final String USAGE_RUNNING = ResourceUsageStatuses.RUNNING;
     private static final String USAGE_RELEASED = ResourceUsageStatuses.RELEASED;
 
     private static final Set<String> RESERVE_ROLES = Set.of("OWNER", "ADMIN", "MEMBER");
@@ -243,12 +242,32 @@ public class ResourceSlotServiceImpl implements ResourceSlotService {
         if (active.getTenantId() == null || principalTenantId != active.getTenantId()) {
             return Result.failure(ResultCode.FORBIDDEN, "无权释放该资源占用");
         }
+        return applyRelease(active, buildReleaseReason(request.reason(), request.remark()));
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void releaseForTaskInstanceSystem(Long taskInstanceId, String reason) {
+        if (taskInstanceId == null) {
+            return;
+        }
+        ReleaseResourceRequest request = new ReleaseResourceRequest(taskInstanceId, null, reason, "system");
+        ResourceUsage active = findActiveUsage(request);
+        if (active == null) {
+            if (!isAlreadyReleased(request)) {
+                log.debug("系统释放：未找到可释放占用 taskInstanceId={}", taskInstanceId);
+            }
+            return;
+        }
+        applyRelease(active, buildReleaseReason(reason, "system"));
+    }
+
+    private Result<Void> applyRelease(ResourceUsage active, String reasonText) {
         if (active.getNodeId() == null) {
             log.warn("release skipped slot restore: usageId={} has null nodeId", active.getId());
         }
 
         LocalDateTime now = LocalDateTime.now();
-        String reasonText = buildReleaseReason(request.reason(), request.remark());
         int u = resourceUsageMapper.update(
                 null,
                 new LambdaUpdateWrapper<ResourceUsage>()
@@ -264,11 +283,13 @@ public class ResourceSlotServiceImpl implements ResourceSlotService {
         if (active.getNodeId() != null) {
             restoreSlots(active.getNodeId(), active.getCpuUsed(), active.getMemoryMbUsed(), active.getGpuUsed());
         }
-        resourceQuotaService.releaseForReserve(
-                active.getTenantId(),
-                nz(active.getCpuUsed()),
-                nz(active.getMemoryMbUsed()),
-                nz(active.getGpuUsed()));
+        if (active.getTenantId() != null) {
+            resourceQuotaService.releaseForReserve(
+                    active.getTenantId(),
+                    nz(active.getCpuUsed()),
+                    nz(active.getMemoryMbUsed()),
+                    nz(active.getGpuUsed()));
+        }
         log.info(
                 "resource release ok usageId={} taskInstanceId={} tenantId={} nodeId={} reason={}",
                 active.getId(), active.getTaskInstanceId(), active.getTenantId(), active.getNodeId(), reasonText);

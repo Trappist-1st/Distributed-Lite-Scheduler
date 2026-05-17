@@ -24,6 +24,9 @@ public record RegisterResourceNodeRequest(
         @Max(value = 65535, message = "端口范围无效")
         Integer nodePort,
 
+        @Size(max = 256, message = "workerEndpoint 过长")
+        String workerEndpoint,
+
         @NotBlank(message = "节点类型不能为空")
         @Pattern(regexp = "^(CPU|GPU|MIXED)$", message = "节点类型仅支持 CPU/GPU/MIXED")
         String nodeType,

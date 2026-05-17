@@ -207,8 +207,25 @@ public class ResourceServiceImpl extends ServiceImpl<ResourceNodeMapper, Resourc
         target.setNodeName(request.nodeName().trim());
         target.setNodeHost(request.nodeHost().trim());
         target.setNodePort(request.nodePort());
+        if (StringUtils.hasText(request.workerEndpoint())) {
+            target.setWorkerEndpoint(normalizeWorkerEndpoint(request.workerEndpoint()));
+        } else {
+            target.setWorkerEndpoint(defaultWorkerEndpoint(request.nodeHost(), request.nodePort()));
+        }
         target.setNodeType(request.nodeType().trim());
         target.setGpuModel(StringUtils.hasText(request.gpuModel()) ? request.gpuModel().trim() : null);
         target.setLabels(StringUtils.hasText(request.labels()) ? request.labels().trim() : null);
+    }
+
+    private static String defaultWorkerEndpoint(String host, int port) {
+        return "http://" + host.trim() + ":" + port;
+    }
+
+    private static String normalizeWorkerEndpoint(String endpoint) {
+        String trimmed = endpoint.trim();
+        while (trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed;
     }
 }
