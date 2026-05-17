@@ -1,5 +1,6 @@
 package com.imperium.distributed_lite_scheduler_v1.controller;
 
+import com.imperium.distributed_lite_scheduler_v1.config.OpenApiConfig;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.metadata.IPage;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
@@ -19,29 +20,18 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.*;
 
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 
-/**
- * 工作流实例Controller
- *
- * <p>提供工作流实例的REST API</p>
- *
- * <p>API列表：</p>
- * <ul>
- *   <li>POST /api/workflow/instance/execute — 创建并执行工作流实例</li>
- *   <li>GET /api/workflow/instance/{id} — 查询工作流实例详情</li>
- *   <li>GET /api/workflow/instance/list — 查询工作流实例列表（分页）</li>
- *   <li>POST /api/workflow/instance/{id}/pause — 暂停工作流实例</li>
- *   <li>POST /api/workflow/instance/{id}/resume — 恢复工作流实例</li>
- *   <li>POST /api/workflow/instance/{id}/cancel — 取消工作流实例</li>
- *   <li>POST /api/workflow/instance/{id}/rerun — 重新运行工作流实例</li>
- *   <li>DELETE /api/workflow/instance/{id} — 删除工作流实例（仅终止态）</li>
- * </ul>
- */
+@Tag(name = "工作流实例", description = "创建执行、暂停/恢复/取消、重试与删除")
+@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 @RestController
 @RequestMapping("/api/workflow/instance")
 @Slf4j
@@ -59,11 +49,7 @@ public class WorkflowInstanceController {
     @Autowired
     private WorkflowMapper workflowMapper;
 
-    /**
-     * 创建并执行工作流实例
-     *
-     * <p>POST /api/workflow/instance/execute</p>
-     */
+    @Operation(summary = "创建并执行工作流实例", description = "创建实例并异步投递第 0 层任务")
     @PostMapping("/execute")
     public Result<Map<String, Object>> executeWorkflow(@Valid @RequestBody WorkflowInstanceCreateRequest request) {
         log.info("接收到执行工作流请求, workflowId={}", request.getWorkflowId());
@@ -86,13 +72,10 @@ public class WorkflowInstanceController {
         }
     }
 
-    /**
-     * 查询工作流实例详情
-     *
-     * <p>GET /api/workflow/instance/{id}</p>
-     */
+    @Operation(summary = "查询工作流实例详情")
     @GetMapping("/{id}")
-    public Result<WorkflowInstanceVO> getWorkflowInstance(@PathVariable Long id) {
+    public Result<WorkflowInstanceVO> getWorkflowInstance(
+            @Parameter(description = "实例 ID") @PathVariable Long id) {
         log.info("查询工作流实例详情, id={}", id);
         WorkflowInstance instance = workflowInstanceService.getWorkflowInstance(id);
         if (instance == null) {
@@ -101,15 +84,11 @@ public class WorkflowInstanceController {
         return Result.success(toWorkflowInstanceVO(instance));
     }
 
-    /**
-     * 查询工作流实例列表
-     *
-     * <p>GET /api/workflow/instance/list?workflowId=&amp;status=&amp;page=&amp;size=</p>
-     */
+    @Operation(summary = "分页查询工作流实例列表")
     @GetMapping("/list")
     public Result<Map<String, Object>> listWorkflowInstances(
-            @RequestParam(required = false) Long workflowId,
-            @RequestParam(required = false) String status,
+            @Parameter(description = "按工作流定义过滤") @RequestParam(required = false) Long workflowId,
+            @Parameter(description = "实例状态") @RequestParam(required = false) String status,
             @RequestParam(defaultValue = "1") Integer page,
             @RequestParam(defaultValue = "20") Integer size) {
         log.info("查询工作流实例列表, workflowId={}, status={}", workflowId, status);
@@ -131,11 +110,7 @@ public class WorkflowInstanceController {
         return Result.success(body);
     }
 
-    /**
-     * 暂停工作流实例
-     *
-     * <p>POST /api/workflow/instance/{id}/pause</p>
-     */
+    @Operation(summary = "暂停工作流实例", description = "仅 RUNNING 可暂停；已在跑的任务继续完成")
     @PostMapping("/{id}/pause")
     public Result<Void> pauseWorkflow(@PathVariable Long id) {
         log.info("暂停工作流实例, id={}", id);
@@ -154,11 +129,7 @@ public class WorkflowInstanceController {
         }
     }
 
-    /**
-     * 恢复工作流实例
-     *
-     * <p>POST /api/workflow/instance/{id}/resume</p>
-     */
+    @Operation(summary = "恢复工作流实例")
     @PostMapping("/{id}/resume")
     public Result<Void> resumeWorkflow(@PathVariable Long id) {
         log.info("恢复工作流实例, id={}", id);
@@ -177,11 +148,7 @@ public class WorkflowInstanceController {
         }
     }
 
-    /**
-     * 取消工作流实例
-     *
-     * <p>POST /api/workflow/instance/{id}/cancel</p>
-     */
+    @Operation(summary = "取消工作流实例")
     @PostMapping("/{id}/cancel")
     public Result<Void> cancelWorkflow(@PathVariable Long id) {
         log.info("取消工作流实例, id={}", id);
@@ -200,11 +167,7 @@ public class WorkflowInstanceController {
         }
     }
 
-    /**
-     * 重新运行工作流实例
-     *
-     * <p>POST /api/workflow/instance/{id}/rerun</p>
-     */
+    @Operation(summary = "重新运行工作流", description = "基于原实例创建新实例并执行")
     @PostMapping("/{id}/rerun")
     public Result<Map<String, Object>> rerunWorkflow(@PathVariable Long id) {
         log.info("重新运行工作流实例, id={}", id);
@@ -227,11 +190,7 @@ public class WorkflowInstanceController {
         }
     }
 
-    /**
-     * 删除工作流实例（仅允许已终止实例）
-     *
-     * <p>DELETE /api/workflow/instance/{id}</p>
-     */
+    @Operation(summary = "删除工作流实例", description = "仅允许已终止状态的实例")
     @DeleteMapping("/{id}")
     public Result<Void> deleteWorkflow(@PathVariable Long id) {
         log.info("删除工作流实例, id={}", id);
@@ -250,11 +209,7 @@ public class WorkflowInstanceController {
         }
     }
 
-    /**
-     * 重试失败的任务
-     *
-     * <p>POST /api/workflow/instance/{id}/retry-failed</p>
-     */
+    @Operation(summary = "重试失败任务", description = "将 FAILED 节点重置为 PENDING 并重新投递")
     @PostMapping("/{id}/retry-failed")
     public Result<Map<String, Object>> retryFailedTasks(@PathVariable Long id) {
         log.info("重试失败的任务, id={}", id);

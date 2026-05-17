@@ -1,5 +1,6 @@
 package com.imperium.distributed_lite_scheduler_v1.controller;
 
+import com.imperium.distributed_lite_scheduler_v1.config.OpenApiConfig;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.ListResourceNodesRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.ListResourceUsageRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.RegisterResourceNodeRequest;
@@ -12,6 +13,9 @@ import com.imperium.distributed_lite_scheduler_v1.model.entity.ResourceUsage;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceService;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceSlotService;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.ModelAttribute;
@@ -23,6 +27,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.util.List;
 
+@Tag(name = "资源节点", description = "Worker 注册、心跳、槽位预留与使用查询")
 @RestController
 @RequestMapping("/api/resource")
 public class ResourceController {
@@ -35,61 +40,49 @@ public class ResourceController {
         this.resourceSlotService = resourceSlotService;
     }
 
-    /**
-     * Worker 节点注册。
-     */
+    @Operation(summary = "注册资源节点", description = "Worker 启动时调用，无需 JWT")
     @PostMapping("/register")
     public Result<ResourceNode> register(@RequestBody @Valid RegisterResourceNodeRequest request) {
         return resourceService.registerNode(request);
     }
 
-    /**
-     * 节点心跳上报。
-     */
+    @Operation(summary = "节点心跳", description = "Worker 定期上报可用资源，无需 JWT")
     @PostMapping("/heartbeat")
     public Result<ResourceNode> heartbeat(@RequestBody @Valid ResourceHeartbeatRequest request) {
         return resourceService.heartbeat(request);
     }
 
-    /**
-     * 节点状态分页查询。
-     */
+    @Operation(summary = "查询资源节点列表", security = @SecurityRequirement(name = OpenApiConfig.BEARER_AUTH))
     @GetMapping("/nodes")
     public Result<List<ResourceNode>> listNodes(@ModelAttribute @Valid ListResourceNodesRequest request) {
         return resourceService.listNodes(request);
     }
 
-    /**
-     * 超时节点自动下线（可供内部定时任务触发）。
-     */
+    @Operation(
+            summary = "超时节点下线",
+            description = "将心跳超时的节点标记为 OFFLINE",
+            security = @SecurityRequirement(name = OpenApiConfig.BEARER_AUTH))
     @PostMapping("/internal/offline-timeout")
     public Result<Integer> offlineTimeoutNodes(
             @RequestParam(defaultValue = "60") Integer heartbeatTimeoutSeconds) {
         return resourceService.offlineTimeoutNodes(heartbeatTimeoutSeconds);
     }
 
-    /**
-     * 为任务实例预留资源（P2-2）。
-     */
+    @Operation(summary = "预留资源槽位", security = @SecurityRequirement(name = OpenApiConfig.BEARER_AUTH))
     @PostMapping("/reserve")
     public Result<ReserveResourceResponse> reserve(@RequestBody @Valid ReserveResourceRequest request) {
         return resourceSlotService.reserve(request);
     }
 
-    /**
-     * 释放任务占用的槽位资源（P2-2）。
-     */
+    @Operation(summary = "释放资源槽位", security = @SecurityRequirement(name = OpenApiConfig.BEARER_AUTH))
     @PostMapping("/release")
     public Result<Void> release(@RequestBody @Valid ReleaseResourceRequest request) {
         return resourceSlotService.release(request);
     }
 
-    /**
-     * 分页查询资源使用流水（P2-2）。
-     */
+    @Operation(summary = "查询资源使用流水", security = @SecurityRequirement(name = OpenApiConfig.BEARER_AUTH))
     @GetMapping("/usage")
     public Result<List<ResourceUsage>> listUsage(@ModelAttribute @Valid ListResourceUsageRequest request) {
         return resourceSlotService.listUsage(request);
     }
 }
-

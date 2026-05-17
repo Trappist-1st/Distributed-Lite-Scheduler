@@ -1,5 +1,6 @@
 package com.imperium.distributed_lite_scheduler_v1.controller;
 
+import com.imperium.distributed_lite_scheduler_v1.config.OpenApiConfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatus;
 import com.imperium.distributed_lite_scheduler_v1.constant.WorkflowInstanceStatus;
@@ -18,6 +19,10 @@ import com.imperium.distributed_lite_scheduler_v1.utils.ResultCode;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.util.StringUtils;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.Duration;
@@ -32,23 +37,8 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
-/**
- * 工作流实例监控Controller
- *
- * <p>提供工作流实例监控相关的API（进度、任务列表、执行计划快照、时间线）。</p>
- *
- * <p>说明：任务完成后的下一层推进依赖 Redis Stream 消费（见 {@link com.imperium.distributed_lite_scheduler_v1.service.workflow.stream.TaskCompletionStreamHandler}），
- * 本 Controller 仅基于当前库表状态做只读聚合。</p>
- *
- * <p>API列表：</p>
- * <ul>
- *   <li>GET /api/workflow/instance/{id}/progress — 获取实时进度</li>
- *   <li>GET /api/workflow/instance/{id}/tasks — 获取任务列表</li>
- *   <li>GET /api/workflow/instance/{id}/tasks/{taskId} — 获取任务详情</li>
- *   <li>GET /api/workflow/instance/{id}/execution-plan — 获取执行计划快照（JSON 反序列化）</li>
- *   <li>GET /api/workflow/instance/{id}/timeline — 获取执行时间线（甘特图数据）</li>
- * </ul>
- */
+@Tag(name = "工作流监控", description = "实例进度、任务列表、执行计划快照与时间线（只读）")
+@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 @RestController
 @RequestMapping("/api/workflow/instance")
 @Slf4j
@@ -66,11 +56,7 @@ public class WorkflowInstanceMonitorController {
     @Autowired
     private ObjectMapper objectMapper;
 
-    /**
-     * 获取工作流实例实时进度
-     *
-     * <p>GET /api/workflow/instance/{id}/progress</p>
-     */
+    @Operation(summary = "获取实例实时进度", description = "含分层进度与预估剩余时间")
     @GetMapping("/{id}/progress")
     public Result<WorkflowProgressVO> getProgress(@PathVariable Long id) {
         log.info("获取工作流实例进度, id={}", id);
@@ -83,16 +69,14 @@ public class WorkflowInstanceMonitorController {
         return Result.success(vo);
     }
 
-    /**
-     * 获取工作流实例的任务列表
-     *
-     * <p>GET /api/workflow/instance/{id}/tasks</p>
-     */
+    @Operation(summary = "获取实例任务列表", description = "可按状态、层级过滤")
     @GetMapping("/{id}/tasks")
     public Result<List<WorkflowTaskInstanceVO>> getTasks(
             @PathVariable Long id,
-            @RequestParam(required = false) String status,
-            @RequestParam(required = false) Integer layerIndex) {
+            @Parameter(description = "任务状态：PENDING/RUNNING/SUCCESS/FAILED/SKIPPED")
+                    @RequestParam(required = false)
+                    String status,
+            @Parameter(description = "拓扑层索引") @RequestParam(required = false) Integer layerIndex) {
         log.info("获取工作流实例任务列表, id={}, status={}, layerIndex={}", id, status, layerIndex);
         if (workflowInstanceService.getWorkflowInstance(id) == null) {
             return Result.failure(ResultCode.NOT_FOUND, "工作流实例不存在");
@@ -110,13 +94,11 @@ public class WorkflowInstanceMonitorController {
         return Result.success(rows);
     }
 
-    /**
-     * 获取工作流任务实例详情
-     *
-     * <p>GET /api/workflow/instance/{id}/tasks/{taskId}</p>
-     */
+    @Operation(summary = "获取工作流任务节点详情")
     @GetMapping("/{id}/tasks/{taskId}")
-    public Result<WorkflowTaskInstanceVO> getTaskDetail(@PathVariable Long id, @PathVariable Long taskId) {
+    public Result<WorkflowTaskInstanceVO> getTaskDetail(
+            @PathVariable Long id,
+            @Parameter(description = "workflow_task_instance 表主键") @PathVariable Long taskId) {
         log.info("获取工作流任务实例详情, id={}, taskId={}", id, taskId);
         if (workflowInstanceService.getWorkflowInstance(id) == null) {
             return Result.failure(ResultCode.NOT_FOUND, "工作流实例不存在");
@@ -128,11 +110,7 @@ public class WorkflowInstanceMonitorController {
         return Result.success(toTaskVo(task));
     }
 
-    /**
-     * 获取执行计划（实例创建时写入的快照）
-     *
-     * <p>GET /api/workflow/instance/{id}/execution-plan</p>
-     */
+    @Operation(summary = "获取执行计划快照", description = "实例创建时固化的分层拓扑 JSON")
     @GetMapping("/{id}/execution-plan")
     public Result<WorkflowExecutionPlan> getExecutionPlan(@PathVariable Long id) {
         log.info("获取工作流实例执行计划, id={}", id);
@@ -153,11 +131,7 @@ public class WorkflowInstanceMonitorController {
         }
     }
 
-    /**
-     * 获取执行时间线（用于甘特图等可视化）
-     *
-     * <p>GET /api/workflow/instance/{id}/timeline</p>
-     */
+    @Operation(summary = "获取执行时间线", description = "甘特图/时间轴可视化数据")
     @GetMapping("/{id}/timeline")
     public Result<Map<String, Object>> getTimeline(@PathVariable Long id) {
         log.info("获取工作流实例执行时间线, id={}", id);

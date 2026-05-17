@@ -1,5 +1,6 @@
 package com.imperium.distributed_lite_scheduler_v1.controller;
 
+import com.imperium.distributed_lite_scheduler_v1.config.OpenApiConfig;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.workflow.WorkflowCreateRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.workflow.WorkflowUpdateRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.workflow.WorkflowVO;
@@ -11,17 +12,15 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import java.util.List;
 
-/**
- * 工作流Controller
- * 
- * 提供工作流的CRUD接口
- * 
- * @author UNSC
- * @since 2026-05-03
- */
+@Tag(name = "工作流定义", description = "DAG 工作流 CRUD")
+@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 @RestController
 @RequestMapping("/api/workflow")
 @Slf4j
@@ -30,12 +29,7 @@ public class WorkflowController {
     @Autowired
     private WorkflowService workflowService;
     
-    /**
-     * 创建工作流
-     * 
-     * @param request 创建请求
-     * @return 工作流ID
-     */
+    @Operation(summary = "创建工作流", description = "提交 DAG JSON 与元数据，返回工作流 ID")
     @PostMapping
     public Result<Long> createWorkflow(@RequestBody @Valid WorkflowCreateRequest request) {
         log.info("创建工作流 workflowName={}", request.getWorkflowName());
@@ -51,14 +45,10 @@ public class WorkflowController {
         }
     }
     
-    /**
-     * 查询工作流详情
-     * 
-     * @param id 工作流ID
-     * @return 工作流详情
-     */
+    @Operation(summary = "查询工作流详情")
     @GetMapping("/{id}")
-    public Result<WorkflowVO> getWorkflow(@PathVariable Long id) {
+    public Result<WorkflowVO> getWorkflow(
+            @Parameter(description = "工作流 ID") @PathVariable Long id) {
         log.info("查询工作流详情 id={}", id);
         Workflow workflow = workflowService.getById(id);
         if (workflow == null) {
@@ -67,13 +57,7 @@ public class WorkflowController {
         return Result.success(workflowService.toVO(workflow));
     }
     
-    /**
-     * 更新工作流
-     * 
-     * @param id 工作流ID
-     * @param request 更新请求
-     * @return 操作结果
-     */
+    @Operation(summary = "更新工作流")
     @PutMapping("/{id}")
     public Result<Void> updateWorkflow(
             @PathVariable Long id,
@@ -91,12 +75,7 @@ public class WorkflowController {
         }
     }
     
-    /**
-     * 删除工作流（逻辑删除）
-     * 
-     * @param id 工作流ID
-     * @return 操作结果
-     */
+    @Operation(summary = "删除工作流", description = "逻辑删除")
     @DeleteMapping("/{id}")
     public Result<Void> deleteWorkflow(@PathVariable Long id) {
         log.info("删除工作流 id={}", id);
@@ -112,17 +91,11 @@ public class WorkflowController {
         }
     }
     
-    /**
-     * 查询项目下的工作流列表
-     * 
-     * @param projectId 项目ID
-     * @param status 状态（可选）：0-禁用，1-正常，null-全部
-     * @return 工作流列表
-     */
+    @Operation(summary = "查询项目下工作流列表")
     @GetMapping("/list")
     public Result<List<WorkflowVO>> listWorkflows(
-            @RequestParam Long projectId,
-            @RequestParam(required = false) Integer status) {
+            @Parameter(description = "项目 ID") @RequestParam Long projectId,
+            @Parameter(description = "状态：0-禁用，1-正常，空-全部") @RequestParam(required = false) Integer status) {
         log.info("查询工作流列表 projectId={} status={}", projectId, status);
         try {
             List<WorkflowVO> workflows = workflowService.listWorkflows(projectId, status);

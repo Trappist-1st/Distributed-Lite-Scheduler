@@ -31,3 +31,12 @@ worker:
 logging:
   level:
     com.imperium.distributed_lite_worker: INFO
+
+# OpenAPI / Swagger UI：http://localhost:9090/swagger-ui.html
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha

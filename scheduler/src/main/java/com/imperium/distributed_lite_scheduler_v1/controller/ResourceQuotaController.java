@@ -1,11 +1,16 @@
 package com.imperium.distributed_lite_scheduler_v1.controller;
 
+import com.imperium.distributed_lite_scheduler_v1.config.OpenApiConfig;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.QuotaCheckRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.QuotaCheckResponse;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.ResourceQuotaDetailResponse;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.UpdateResourceQuotaRequest;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceQuotaService;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -15,9 +20,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-/**
- * 租户资源配额 API（P2-3，设计稿 §4）。
- */
+@Tag(name = "资源配额", description = "租户级 CPU/内存/GPU 配额管理与校验")
+@SecurityRequirement(name = OpenApiConfig.BEARER_AUTH)
 @RestController
 @RequestMapping("/api/resource/quota")
 public class ResourceQuotaController {
@@ -28,22 +32,14 @@ public class ResourceQuotaController {
         this.resourceQuotaService = resourceQuotaService;
     }
 
-    /**
-     * 获取租户资源配额详情。
-     * @param tenantId
-     * @return
-     */
+    @Operation(summary = "查询租户资源配额")
     @GetMapping("/{tenantId}")
-    public Result<ResourceQuotaDetailResponse> getQuota(@PathVariable Long tenantId) {
+    public Result<ResourceQuotaDetailResponse> getQuota(
+            @Parameter(description = "租户 ID") @PathVariable Long tenantId) {
         return resourceQuotaService.getQuota(tenantId);
     }
 
-    /**
-     * 更新租户资源配额。
-     * @param tenantId
-     * @param request
-     * @return
-     */
+    @Operation(summary = "更新租户资源配额")
     @PutMapping("/{tenantId}")
     public Result<ResourceQuotaDetailResponse> updateQuota(
             @PathVariable Long tenantId,
@@ -51,12 +47,7 @@ public class ResourceQuotaController {
         return resourceQuotaService.updateQuota(tenantId, request);
     }
 
-    /**
-     * 检查租户资源配额是否满足请求。
-     * @param tenantId
-     * @param request
-     * @return
-     */
+    @Operation(summary = "校验配额是否满足", description = "调度前或提交任务前预检查")
     @PostMapping("/{tenantId}/check")
     public Result<QuotaCheckResponse> checkQuota(
             @PathVariable Long tenantId,

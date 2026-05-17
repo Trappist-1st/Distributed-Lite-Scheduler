@@ -30,7 +30,12 @@ public class WorkerSecurityConfig {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> {
                     auth.requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
-                            .requestMatchers("/error", "/actuator/health").permitAll();
+                            .requestMatchers("/error", "/actuator/health").permitAll()
+                            .requestMatchers(
+                                    "/v3/api-docs/**",
+                                    "/swagger-ui/**",
+                                    "/swagger-ui.html")
+                            .permitAll();
                     if (tokenRequired) {
                         auth.anyRequest().authenticated();
                     } else {

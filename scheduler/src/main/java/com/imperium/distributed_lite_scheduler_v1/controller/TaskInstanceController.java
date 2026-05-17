@@ -1,10 +1,15 @@
 package com.imperium.distributed_lite_scheduler_v1.controller;
 
+import com.imperium.distributed_lite_scheduler_v1.config.OpenApiConfig;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.InternalTaskInstanceStatusTransitionRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.TaskInstance;
 import com.imperium.distributed_lite_scheduler_v1.service.TaskInstanceService;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import com.imperium.distributed_lite_scheduler_v1.utils.ResultCode;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.util.StringUtils;
@@ -15,6 +20,8 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+@Tag(name = "内部-任务实例", description = "Worker 回调等内部状态流转接口（非 JWT，使用 X-Internal-Token）")
+@SecurityRequirement(name = OpenApiConfig.INTERNAL_TOKEN)
 @RestController
 @RequestMapping("/api/internal/task-instances")
 public class TaskInstanceController {
@@ -31,9 +38,12 @@ public class TaskInstanceController {
         this.internalApiToken = internalApiToken;
     }
 
+    @Operation(
+            summary = "任务实例状态流转",
+            description = "Worker 执行完成后回调，将 RUNNING 更新为 SUCCESS/FAILED/TIMEOUT 等")
     @PostMapping("/{id}/status")
     public Result<TaskInstance> transitionStatus(
-            @PathVariable("id") Long id,
+            @Parameter(description = "任务实例 ID") @PathVariable("id") Long id,
             @RequestHeader(name = INTERNAL_TOKEN_HEADER, required = false) String internalToken,
             @RequestBody @Valid InternalTaskInstanceStatusTransitionRequest request) {
         if (!StringUtils.hasText(internalApiToken)) {
