@@ -15,70 +15,55 @@ import com.imperium.distributed_lite_scheduler_v1.service.ResourceQuotaService;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceSlotService;
 import com.imperium.distributed_lite_scheduler_v1.service.executor.TaskDispatchService;
 import com.imperium.distributed_lite_scheduler_v1.service.scheduler.FifoSchedulerService;
+import com.imperium.distributed_lite_scheduler_v1.service.scheduler.TaskScheduleLock;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
-import org.redisson.api.RedissonClient;
-import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 /**
  * FIFO 调度器实现（骨架）。
  */
 @Slf4j
 @Service
+@ConditionalOnProperty(name = "scheduler.strategy", havingValue = "fifo")
 public class FifoSchedulerServiceImpl implements FifoSchedulerService {
 
     private static final int BATCH_SIZE = 100;
-    private static final long SCHEDULE_INTERVAL_MS = 5000L;
-    private static final int TASK_LOCK_WAIT_SECONDS = 1;
-    private static final int TASK_LOCK_LEASE_SECONDS = 10;
 
     private final TaskInstanceMapper taskInstanceMapper;
     private final ResourceNodeMapper resourceNodeMapper;
     private final ResourceSlotService resourceSlotService;
     private final ResourceQuotaService resourceQuotaService;
-    private final RedissonClient redissonClient;
+    private final TaskScheduleLock taskScheduleLock;
     private final TaskDispatchService taskDispatchService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    //这里使用volatile是因为isLeader可能会被多个线程访问和修改，volatile可以保证线程之间的可见性和有序性，
-    //确保所有线程都能看到最新的isLeader值，避免出现多个线程同时认为自己是Leader的情况。
-    private volatile boolean isLeader = false;
-
-    public FifoSchedulerServiceImpl(TaskInstanceMapper taskInstanceMapper,
-                                    ResourceNodeMapper resourceNodeMapper,
-                                    ResourceSlotService resourceSlotService,
-                                    ResourceQuotaService resourceQuotaService,
-                                    RedissonClient redissonClient,
-                                    TaskDispatchService taskDispatchService) {
+    public FifoSchedulerServiceImpl(
+            TaskInstanceMapper taskInstanceMapper,
+            ResourceNodeMapper resourceNodeMapper,
+            ResourceSlotService resourceSlotService,
+            ResourceQuotaService resourceQuotaService,
+            TaskScheduleLock taskScheduleLock,
+            TaskDispatchService taskDispatchService) {
         this.taskInstanceMapper = taskInstanceMapper;
         this.resourceNodeMapper = resourceNodeMapper;
         this.resourceSlotService = resourceSlotService;
         this.resourceQuotaService = resourceQuotaService;
-        this.redissonClient = redissonClient;
+        this.taskScheduleLock = taskScheduleLock;
         this.taskDispatchService = taskDispatchService;
     }
 
-    //FIFO调度主循环
     @Override
-    @Scheduled(fixedRate = SCHEDULE_INTERVAL_MS)
     public void scheduleLoop() {
         //Step 0: 记录本轮调度开始时间，用于计算周期耗时与延迟指标。
         long loopStart = System.currentTimeMillis();
-
-        // Step 1: Leader 选举校验（Redis 分布式锁）。
-        // 目标：同一时刻仅允许一个调度器实例执行 scheduleLoop。
-        if (!tryAcquireLeadership()) {
-            log.debug("非 Leader 节点，跳过本轮调度");
-            return;
-        }
 
         log.info("开始调度周期");
 
@@ -111,41 +96,19 @@ public class FifoSchedulerServiceImpl implements FifoSchedulerService {
         }
     }
 
-    //尝试获取Leader锁,Leader选举（使用Redis分布式锁实现）
-    private boolean tryAcquireLeadership() {
-        //首先创建锁，使用固定的key,所有竞争该角色的节点都使用同一把锁，谁拿到锁谁就是Leader
-        String lockKey = "scheduler:leader:lock";
-        RLock lock = redissonClient.getLock(lockKey);
-        try {
-            //尝试获取锁，设置过期时间，防止死锁
-            boolean acquired = lock.tryLock(0, 30, TimeUnit.SECONDS);
-
-            if(acquired && !isLeader){
-                isLeader = true;
-                log.info("成功获取Leader锁，成为Leader节点");
-            }
-            return acquired;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
-    }
-
     @Override
     public boolean scheduleTask(TaskInstance task) {
         if (task == null || task.getId() == null) {
             return false;
         }
 
-        //这个锁是为了保证同一任务在调度过程中不会被多个线程同时处理，避免状态更新和资源预留的并发冲突。
-        String lockKey = "task:schedule:lock:" + task.getId();
-        RLock lock = redissonClient.getLock(lockKey);
+        // 任务级锁：Watchdog 续期，finally 显式释放，避免固定 lease 过期后双实例进入同一 scheduleTask。
+        RLock lock = taskScheduleLock.lockFor(task.getId());
         Long reservedUsageId = null;
         long startMs = System.currentTimeMillis();
 
         try {
-            boolean acquired = lock.tryLock(TASK_LOCK_WAIT_SECONDS, TASK_LOCK_LEASE_SECONDS, TimeUnit.SECONDS);
-            if (!acquired) {
+            if (!taskScheduleLock.tryAcquire(lock)) {
                 log.debug("任务调度锁获取失败，跳过 taskId={}", task.getId());
                 return false;
             }
@@ -203,10 +166,6 @@ public class FifoSchedulerServiceImpl implements FifoSchedulerService {
             long elapsed = System.currentTimeMillis() - startMs;
             log.info("任务调度成功 taskId={} nodeId={} elapsedMs={}", latest.getId(), selectedNode.getId(), elapsed);
             return true;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn("任务调度被中断 taskId={}", task.getId(), e);
-            return false;
         } catch (Exception e) {
             if (reservedUsageId != null) {
                 rollbackReservation(task, reservedUsageId);
@@ -214,9 +173,7 @@ public class FifoSchedulerServiceImpl implements FifoSchedulerService {
             log.error("任务调度异常 taskId={}", task.getId(), e);
             return false;
         } finally {
-            if (lock.isHeldByCurrentThread()) {
-                lock.unlock();
-            }
+            taskScheduleLock.release(lock);
         }
     }
 

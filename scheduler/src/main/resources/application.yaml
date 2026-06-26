@@ -66,6 +66,16 @@ internal:
   api:
     token: ${INTERNAL_API_TOKEN:}
 
+# 任务调度：三选一（fifo | priority | resource-aware），多实例竞争同一 leader-lock-key
+scheduler:
+  strategy: ${SCHEDULER_STRATEGY:resource-aware}
+  loop-interval-ms: ${SCHEDULER_LOOP_INTERVAL_MS:5000}
+  leader-lock-key: ${SCHEDULER_LEADER_LOCK_KEY:scheduler:leader:lock}
+  # 已废弃：Leader 锁使用 Redisson Watchdog + 每轮 finally unlock，见 SchedulerLeaderElection
+  leader-lock-lease-seconds: ${SCHEDULER_LEADER_LOCK_LEASE_SECONDS:30}
+  task-lock-wait-seconds: ${SCHEDULER_TASK_LOCK_WAIT_SECONDS:1}
+  task-lock-key-prefix: ${SCHEDULER_TASK_LOCK_KEY_PREFIX:task:schedule:lock:}
+
 # 任务执行器：mode=in-process（本机）| remote（远程 Worker）
 task:
   executor:

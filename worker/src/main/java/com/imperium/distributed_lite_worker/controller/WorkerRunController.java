@@ -4,6 +4,7 @@ import com.imperium.distributed_lite_worker.config.OpenApiConfig;
 import com.imperium.distributed_lite_worker.dto.WorkerRunAcceptedResponse;
 import com.imperium.distributed_lite_worker.dto.WorkerRunRequest;
 import com.imperium.distributed_lite_worker.service.WorkerRunService;
+import com.imperium.distributed_lite_worker.service.WorkerSubmitOutcome;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
@@ -29,12 +30,12 @@ public class WorkerRunController {
 
     @Operation(
             summary = "提交异步执行任务",
-            description = "立即返回 202，任务在线程池中执行；完成后回调调度中心内部状态 API")
+            description = "立即返回 202；同一 taskInstanceId 重复下发返回 202 + already_accepted，不再二次执行")
     @PostMapping("/runs")
     public ResponseEntity<WorkerRunAcceptedResponse> submitRun(@RequestBody @Valid WorkerRunRequest request) {
-        workerRunService.submitAsync(request);
+        WorkerSubmitOutcome outcome = workerRunService.submitAsync(request);
         return ResponseEntity.status(HttpStatus.ACCEPTED)
-                .body(new WorkerRunAcceptedResponse(request.getTaskInstanceId(), "accepted"));
+                .body(new WorkerRunAcceptedResponse(request.getTaskInstanceId(), outcome.message()));
     }
 
     @Operation(summary = "取消正在执行的任务")

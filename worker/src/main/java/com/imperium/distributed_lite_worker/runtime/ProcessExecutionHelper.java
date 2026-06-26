@@ -27,7 +27,13 @@ public class ProcessExecutionHelper {
         processBuilder.redirectErrorStream(false);
 
         Process process = processBuilder.start();
-        runningTaskRegistry.register(taskInstanceId, new ProcessRunningTaskHandle(taskInstanceId, process));
+        ProcessRunningTaskHandle handle = new ProcessRunningTaskHandle(taskInstanceId, process);
+        if (!runningTaskRegistry.tryRegister(taskInstanceId, handle)) {
+            process.destroyForcibly();
+            process.waitFor(5, TimeUnit.SECONDS);
+            return ExecutionResult.failure(
+                    -1, null, null, "duplicate execution rejected: taskInstanceId already running");
+        }
 
         try {
             long waitSeconds = timeoutSeconds != null && timeoutSeconds > 0 ? timeoutSeconds : Long.MAX_VALUE;

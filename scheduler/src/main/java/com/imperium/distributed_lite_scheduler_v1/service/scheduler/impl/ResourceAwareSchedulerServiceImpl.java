@@ -17,14 +17,14 @@ import com.imperium.distributed_lite_scheduler_v1.service.ResourceQuotaService;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceSlotService;
 import com.imperium.distributed_lite_scheduler_v1.service.executor.TaskDispatchService;
 import com.imperium.distributed_lite_scheduler_v1.service.scheduler.ResourceAwareSchedulerService;
+import com.imperium.distributed_lite_scheduler_v1.service.scheduler.TaskScheduleLock;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
-import org.redisson.api.RedissonClient;
-import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -35,62 +35,52 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 资源感知调度器（P3-4）：在优先级排序基础上按 Best Fit 选择节点并调度。
  */
 @Slf4j
 @Service
+@ConditionalOnProperty(name = "scheduler.strategy", havingValue = "resource-aware", matchIfMissing = true)
 public class ResourceAwareSchedulerServiceImpl implements ResourceAwareSchedulerService {
 
     private static final int BATCH_SIZE = 100;
-    private static final long SCHEDULE_INTERVAL_MS = 5000L;
     private static final double FIT_SCORE_REJECT = -1.0;
     private static final double PRIORITY_WEIGHT = 10.0;
     private static final double AGING_WEIGHT = 0.1;
-    private static final int TASK_LOCK_WAIT_SECONDS = 1;
-    private static final int TASK_LOCK_LEASE_SECONDS = 10;
 
     private final TaskInstanceMapper taskInstanceMapper;
     private final ResourceNodeMapper resourceNodeMapper;
     private final ResourceSlotService resourceSlotService;
     private final ResourceQuotaService resourceQuotaService;
-    private final RedissonClient redissonClient;
+    private final TaskScheduleLock taskScheduleLock;
     private final TaskDispatchService taskDispatchService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    private volatile boolean isLeader = false;
-
-    public ResourceAwareSchedulerServiceImpl(TaskInstanceMapper taskInstanceMapper,
-                                             ResourceNodeMapper resourceNodeMapper,
-                                             ResourceSlotService resourceSlotService,
-                                             ResourceQuotaService resourceQuotaService,
-                                             RedissonClient redissonClient,
-                                             TaskDispatchService taskDispatchService) {
+    public ResourceAwareSchedulerServiceImpl(
+            TaskInstanceMapper taskInstanceMapper,
+            ResourceNodeMapper resourceNodeMapper,
+            ResourceSlotService resourceSlotService,
+            ResourceQuotaService resourceQuotaService,
+            TaskScheduleLock taskScheduleLock,
+            TaskDispatchService taskDispatchService) {
         this.taskInstanceMapper = taskInstanceMapper;
         this.resourceNodeMapper = resourceNodeMapper;
         this.resourceSlotService = resourceSlotService;
         this.resourceQuotaService = resourceQuotaService;
-        this.redissonClient = redissonClient;
+        this.taskScheduleLock = taskScheduleLock;
         this.taskDispatchService = taskDispatchService;
     }
 
     /**
-     * 调度主循环：
-     * 1) Leader 选举
-     * 2) 扫描待调度任务
-     * 3) 查询在线节点并执行 Best Fit 选点
-     * 4) 提交单任务调度
+     * 调度主循环（Leader 选举由 {@link com.imperium.distributed_lite_scheduler_v1.service.scheduler.SchedulerLoopRunner} 负责）：
+     * 1) 扫描待调度任务
+     * 2) 查询在线节点并执行 Best Fit 选点
+     * 3) 提交单任务调度
      */
     @Override
-    @Scheduled(fixedDelay = SCHEDULE_INTERVAL_MS)
     public void scheduleLoop() {
         long loopStart = System.currentTimeMillis();
-        if (!tryAcquireLeadership()) {
-            log.debug("非Leader节点，跳过资源感知调度周期");
-            return;
-        }
         try {
             List<TaskWithPriority> tasks = scanPendingTasksWithPriority(BATCH_SIZE);
             if (tasks.isEmpty()) {
@@ -148,11 +138,9 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
             log.warn("无效的任务实例，无法调度 taskInstance={}", taskInstance);
             return false;
         }
-        String lockKey = "task:schedule:lock:" + taskInstance.getId();
-        RLock taskLock = redissonClient.getLock(lockKey);
+        RLock taskLock = taskScheduleLock.lockFor(taskInstance.getId());
         try {
-            boolean lockAcquired = taskLock.tryLock(TASK_LOCK_WAIT_SECONDS, TASK_LOCK_LEASE_SECONDS, TimeUnit.SECONDS);
-            if (!lockAcquired) {
+            if (!taskScheduleLock.tryAcquire(taskLock)) {
                 log.debug("任务调度锁获取失败，跳过 taskId={}", taskInstance.getId());
                 return false;
             }
@@ -178,14 +166,8 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
                 }
                 return finalizeDispatch(latest, best);
             } finally {
-                if (taskLock.isHeldByCurrentThread()) {
-                    taskLock.unlock();
-                }
+                taskScheduleLock.release(taskLock);
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn("任务调度被中断 taskId={}", taskInstance.getId(), e);
-            return false;
         } catch (Exception e) {
             log.error("资源感知任务调度异常 taskId={}", taskInstance.getId(), e);
             return false;
@@ -202,11 +184,9 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
             log.warn("调度到指定节点：参数无效");
             return false;
         }
-        String lockKey = "task:schedule:lock:" + taskInstance.getId();
-        RLock taskLock = redissonClient.getLock(lockKey);
+        RLock taskLock = taskScheduleLock.lockFor(taskInstance.getId());
         try {
-            boolean lockAcquired = taskLock.tryLock(TASK_LOCK_WAIT_SECONDS, TASK_LOCK_LEASE_SECONDS, TimeUnit.SECONDS);
-            if (!lockAcquired) {
+            if (!taskScheduleLock.tryAcquire(taskLock)) {
                 log.debug("任务调度锁获取失败 taskId={}", taskInstance.getId());
                 return false;
             }
@@ -235,13 +215,8 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
                 }
                 return finalizeDispatch(latest, pinned);
             } finally {
-                if (taskLock.isHeldByCurrentThread()) {
-                    taskLock.unlock();
-                }
+                taskScheduleLock.release(taskLock);
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
         } catch (Exception e) {
             log.error("资源感知：调度到指定节点异常 taskId={} nodeId={}", taskInstance.getId(), node.getId(), e);
             return false;
@@ -409,27 +384,6 @@ public class ResourceAwareSchedulerServiceImpl implements ResourceAwareScheduler
             return 0;
         }
         return Math.max(value.intValue(), 0);
-    }
-
-    /**
-     * 尝试获取调度器 Leader 身份。
-     */
-    private boolean tryAcquireLeadership() {
-        // P3-4: 复用 Redis 分布式锁实现 Leader 选举。
-        String lockKey = "scheduler:resource-aware:leader-lock";
-        RLock lock = redissonClient.getLock(lockKey);
-
-        try {
-            boolean acquired = lock.tryLock(0, 30, TimeUnit.SECONDS);
-            if (acquired && !isLeader) {
-                isLeader = true;
-                log.info("Acquired leadership for ResourceAwareSchedulerService.");
-            }
-            return acquired;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
     }
 
     // -------------------------------------------------------------------------

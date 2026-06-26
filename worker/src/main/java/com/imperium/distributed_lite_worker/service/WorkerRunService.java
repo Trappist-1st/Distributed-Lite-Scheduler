@@ -7,6 +7,7 @@ import com.imperium.distributed_lite_worker.executor.LocalRunSpec;
 import com.imperium.distributed_lite_worker.executor.WorkerTaskTypeExecutor;
 import com.imperium.distributed_lite_worker.executor.WorkerTaskTypeExecutorRegistry;
 import com.imperium.distributed_lite_worker.runtime.RunningTaskRegistry;
+import com.imperium.distributed_lite_worker.runtime.WorkerRunAcceptanceRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
@@ -23,6 +24,7 @@ public class WorkerRunService {
     private final WorkerTaskTypeExecutorRegistry executorRegistry;
     private final SchedulerCallbackClient schedulerCallbackClient;
     private final RunningTaskRegistry runningTaskRegistry;
+    private final WorkerRunAcceptanceRegistry acceptanceRegistry;
     private final Executor workerTaskExecutor;
 
     public WorkerRunService(
@@ -30,22 +32,43 @@ public class WorkerRunService {
             WorkerTaskTypeExecutorRegistry executorRegistry,
             SchedulerCallbackClient schedulerCallbackClient,
             RunningTaskRegistry runningTaskRegistry,
+            WorkerRunAcceptanceRegistry acceptanceRegistry,
             @Qualifier("workerTaskExecutor") Executor workerTaskExecutor) {
         this.properties = properties;
         this.executorRegistry = executorRegistry;
         this.schedulerCallbackClient = schedulerCallbackClient;
         this.runningTaskRegistry = runningTaskRegistry;
+        this.acceptanceRegistry = acceptanceRegistry;
         this.workerTaskExecutor = workerTaskExecutor;
     }
 
-    public void submitAsync(WorkerRunRequest request) {
+    /**
+     * 幂等接受任务：同一 {@code taskInstanceId} 在飞行中重复 POST 不再提交线程池。
+     * HTTP 仍返回 202，便于 Scheduler 侧将重复下发视为成功接受（WorkerHttpClient 只认 202）。
+     */
+    public WorkerSubmitOutcome submitAsync(WorkerRunRequest request) {
+        long taskInstanceId = request.getTaskInstanceId();
+        if (!acceptanceRegistry.tryAccept(taskInstanceId)) {
+            log.info("忽略重复下发 taskInstanceId={}（已在执行或排队）", taskInstanceId);
+            return WorkerSubmitOutcome.ALREADY_ACCEPTED;
+        }
+
         try {
-            workerTaskExecutor.execute(() -> executeSync(request));
+            workerTaskExecutor.execute(() -> {
+                try {
+                    executeSync(request);
+                } finally {
+                    acceptanceRegistry.release(taskInstanceId);
+                }
+            });
+            return WorkerSubmitOutcome.ACCEPTED;
         } catch (RejectedExecutionException e) {
-            log.warn("Worker 线程池已满 taskInstanceId={}", request.getTaskInstanceId(), e);
+            acceptanceRegistry.release(taskInstanceId);
+            log.warn("Worker 线程池已满 taskInstanceId={}", taskInstanceId, e);
             schedulerCallbackClient.report(
                     request.getCallback(),
                     ExecutionResult.configurationError("Worker 线程池已满"));
+            return WorkerSubmitOutcome.REJECTED_POOL_FULL;
         }
     }
 

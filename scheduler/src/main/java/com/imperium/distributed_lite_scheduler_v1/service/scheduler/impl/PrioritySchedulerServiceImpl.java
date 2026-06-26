@@ -16,53 +16,50 @@ import com.imperium.distributed_lite_scheduler_v1.service.ResourceQuotaService;
 import com.imperium.distributed_lite_scheduler_v1.service.ResourceSlotService;
 import com.imperium.distributed_lite_scheduler_v1.service.executor.TaskDispatchService;
 import com.imperium.distributed_lite_scheduler_v1.service.scheduler.PrioritySchedulerService;
+import com.imperium.distributed_lite_scheduler_v1.service.scheduler.TaskScheduleLock;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.redisson.api.RLock;
-import org.redisson.api.RedissonClient;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 优先级调度器实现骨架（P3-3）。
  */
 @Slf4j
 @Service
+@ConditionalOnProperty(name = "scheduler.strategy", havingValue = "priority")
 public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
 
     private static final double PRIORITY_WEIGHT = 10.0;
     private static final double AGING_WEIGHT = 0.1;
     private static final int BATCH_SIZE = 100;
-    private static final int TASK_LOCK_WAIT_SECONDS = 1;
-    private static final int TASK_LOCK_LEASE_SECONDS = 10;
 
     private final TaskInstanceMapper taskInstanceMapper;
     private final ResourceNodeMapper resourceNodeMapper;
     private final ResourceSlotService resourceSlotService;
     private final ResourceQuotaService resourceQuotaService;
-    private final RedissonClient redissonClient;
+    private final TaskScheduleLock taskScheduleLock;
     private final TaskDispatchService taskDispatchService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    //使用volatile关键字是保证有序性和可见性，确保并发环境下对isLeader的修改能被其他线程及时看到，避免多个实例同时认为自己是Leader。
-    private volatile boolean isLeader = false;
-
-    public PrioritySchedulerServiceImpl(TaskInstanceMapper taskInstanceMapper,
-                                        ResourceNodeMapper resourceNodeMapper,
-                                        ResourceSlotService resourceSlotService,
-                                        ResourceQuotaService resourceQuotaService,
-                                        RedissonClient redissonClient,
-                                        TaskDispatchService taskDispatchService) {
+    public PrioritySchedulerServiceImpl(
+            TaskInstanceMapper taskInstanceMapper,
+            ResourceNodeMapper resourceNodeMapper,
+            ResourceSlotService resourceSlotService,
+            ResourceQuotaService resourceQuotaService,
+            TaskScheduleLock taskScheduleLock,
+            TaskDispatchService taskDispatchService) {
         this.taskInstanceMapper = taskInstanceMapper;
         this.resourceNodeMapper = resourceNodeMapper;
         this.resourceSlotService = resourceSlotService;
         this.resourceQuotaService = resourceQuotaService;
-        this.redissonClient = redissonClient;
+        this.taskScheduleLock = taskScheduleLock;
         this.taskDispatchService = taskDispatchService;
     }
 
@@ -70,13 +67,6 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
     public void scheduleLoop() {
         // Step 0: 记录调度周期开始时间，用于统计总耗时与调度延迟。
         long loopStart = System.currentTimeMillis();
-
-        // Step 1: 复用 P3-2 的 Leader 选举逻辑（Redis 分布式锁）。
-        // 目标：多实例场景下，同一时刻只允许一个调度器实例执行本轮优先级调度。
-        if (!tryAcquireLeadership()) {
-            log.debug("非Leader节点，跳过优先级调度周期");
-            return;
-        }
 
         try {
             // Step 2: 扫描 PENDING 任务并计算有效优先级。
@@ -113,27 +103,6 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
             //Step 5: 异常兜底。
             // 任意单轮异常不能中断后续调度周期，catch 后仅记录日志并返回。
             log.error("优先级调度周期异常", e);
-        }
-    }
-
-    //依然是Leader选举，P3-2 的实现可复用，确保同一时刻只有一个实例执行调度逻辑
-    //具体使用Redis分布式锁，key 设计为 "scheduler:priority:leader-lock"，过期时间设置为调度周期的合理上限（如 30 秒），并在 scheduleLoop 结束时释放锁。
-    private boolean tryAcquireLeadership() {
-        //使用Redisson分布式锁
-        String lockkey = "scheduler:priority:leader-lock";
-        RLock lock = redissonClient.getLock(lockkey);
-
-        //尝试获取锁，设置合理的等待时间和锁持有时间，避免死锁和长时间占用。
-        try{
-            boolean acquired = lock.tryLock(0, 30, TimeUnit.SECONDS);
-            if(acquired && !isLeader){
-                isLeader = true;
-                log.info("成功获取领导权，成为本轮优先级调度器");
-            }
-            return acquired;
-        }catch (Exception e){
-            Thread.currentThread().interrupt();
-            return false;
         }
     }
 
@@ -212,15 +181,11 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
             log.warn("无效的任务实例，无法调度 taskInstance={}", taskInstance);
             return false;
         }
-        // P3-3 Step 2: 任务级分布式锁。
-        // key = "task:schedule:lock:{taskId}"
-        // tryLock 失败直接返回 false（避免重复调度）。
-        String lockKey = "task:schedule:lock:" + taskInstance.getId();
-        RLock taskLock = redissonClient.getLock(lockKey);
+        // P3-3 Step 2: 任务级分布式锁（Watchdog 续期 + finally unlock）。
+        RLock taskLock = taskScheduleLock.lockFor(taskInstance.getId());
         Long reservedUsageId = null;
         try {
-            boolean lockAcquired = taskLock.tryLock(TASK_LOCK_WAIT_SECONDS, TASK_LOCK_LEASE_SECONDS, TimeUnit.SECONDS);
-            if (!lockAcquired) {
+            if (!taskScheduleLock.tryAcquire(taskLock)) {
                 log.debug("任务调度锁获取失败，跳过 taskId={}", taskInstance.getId());
                 return false;
             }
@@ -298,10 +263,6 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
             log.info("优先级任务调度成功 taskId={} nodeId={} basePriority={}",
                     latest.getId(), selectedNode.getId(), latest.getPriority());
             return true;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.warn("任务调度被中断 taskId={}", taskInstance.getId(), e);
-            return false;
         } catch (Exception e) {
             if (reservedUsageId != null) {
                 rollbackReservation(taskInstance, reservedUsageId);
@@ -309,9 +270,7 @@ public class PrioritySchedulerServiceImpl implements PrioritySchedulerService {
             log.error("优先级任务调度异常 taskId={}", taskInstance.getId(), e);
             return false;
         } finally {
-            if (taskLock.isHeldByCurrentThread()) {
-                taskLock.unlock();
-            }
+            taskScheduleLock.release(taskLock);
         }
     }
 
