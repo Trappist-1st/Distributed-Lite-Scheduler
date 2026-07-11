@@ -1,0 +1,98 @@
+services:
+
+  # ---------------------------------------------------------------------------
+  # 基础设施
+  # ---------------------------------------------------------------------------
+  mysql:
+    image: mysql:8.0
+    container_name: dls-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: dls_root_pass
+      MYSQL_DATABASE: distributed_lite_scheduler
+      MYSQL_USER: dls
+      MYSQL_PASSWORD: dls_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      # 容器首次启动时自动建表（幂等脚本，多次运行安全）
+      - ./docs/schema-complete.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./docs/init-data.sql:/docker-entrypoint-initdb.d/02-init-data.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pdls_root_pass"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: dls-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # 调度中心
+  # ---------------------------------------------------------------------------
+  scheduler:
+    build:
+      context: .
+      dockerfile: scheduler/Dockerfile
+    container_name: dls-scheduler
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: "jdbc:mysql://mysql:3306/distributed_lite_scheduler?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai"
+      SPRING_DATASOURCE_USERNAME: dls
+      SPRING_DATASOURCE_PASSWORD: dls_pass
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: "dls-jwt-secret-for-dev-at-least-32-bytes"
+      INTERNAL_API_TOKEN: "dls-internal-token-dev"
+      SCHEDULER_PUBLIC_BASE_URL: "http://scheduler:8080"
+      TASK_EXECUTOR_MODE: remote
+      WORKER_API_TOKEN: "dls-worker-token-dev"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # 远程执行 Worker（可横向扩展：docker compose scale worker=3）
+  # ---------------------------------------------------------------------------
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    container_name: dls-worker
+    depends_on:
+      scheduler:
+        condition: service_healthy
+    ports:
+      - "9090:9090"
+    environment:
+      SCHEDULER_BASE_URL: "http://scheduler:8080"
+      WORKER_API_TOKEN: "dls-worker-token-dev"
+      WORKER_NODE_NAME: "worker-docker-1"
+      WORKER_NODE_HOST: "worker"
+      WORKER_NODE_PORT: "9090"
+      WORKER_ENDPOINT: "http://worker:9090"
+      WORKER_TOTAL_CPU: "4"
+      WORKER_TOTAL_MEMORY_MB: "8192"
+      WORKER_HEARTBEAT_INTERVAL_SECONDS: "30"
+
+volumes:
+  mysql_data:
+  redis_data:

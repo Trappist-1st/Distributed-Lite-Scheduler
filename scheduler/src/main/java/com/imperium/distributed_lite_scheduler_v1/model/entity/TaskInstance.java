@@ -118,7 +118,14 @@ public class TaskInstance {
      * 已重试次数
      */
     private Integer retryCount;
-    
+
+    /**
+     * 执行器最近心跳时间。
+     * 执行器每 10 秒更新一次；若超过 2 倍心跳间隔（30 秒）无心跳，
+     * NodeHeartbeatWatchdog 判定任务/节点宕机，触发 FAILED 恢复和自动重试。
+     */
+    private LocalDateTime lastHeartbeatAt;
+
     /**
      * 版本号（乐观锁）  这个太妙了，乐观锁可以防止并发修改导致的数据不一致问题，在分布式系统中非常有用。
      */

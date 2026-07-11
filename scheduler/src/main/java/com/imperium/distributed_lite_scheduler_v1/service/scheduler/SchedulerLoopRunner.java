@@ -31,7 +31,7 @@ public class SchedulerLoopRunner {
                 schedulerProperties.getLeaderLockKey());
     }
 
-    @Scheduled(fixedDelayString = "${scheduler.loop-interval-ms:5000}")
+    @Scheduled(fixedRateString = "${scheduler.loop-interval-ms:5000}")
     public void runScheduleLoop() {
         if (!schedulerLeaderElection.tryAcquireLeadership()) {
             log.debug("非 Leader 节点，跳过本轮调度 strategy={}", schedulerProperties.getStrategy());

@@ -4,6 +4,7 @@ import com.imperium.distributed_lite_scheduler_v1.constant.TaskInstanceStatus;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.InternalTaskInstanceStatusTransitionRequest;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.TaskInstance;
 import com.imperium.distributed_lite_scheduler_v1.service.TaskInstanceService;
+import com.imperium.distributed_lite_scheduler_v1.service.scheduler.TaskRetryService;
 import com.imperium.distributed_lite_scheduler_v1.utils.Result;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -20,6 +21,7 @@ public class TaskExecutionReporter {
     private static final String TRIGGER_WORKER = "WORKER";
 
     private final TaskInstanceService taskInstanceService;
+    private final TaskRetryService taskRetryService;
 
     public void report(ExecutionResult result, Long taskInstanceId) {
         if (result.isTimedOut()) {
@@ -44,23 +46,38 @@ public class TaskExecutionReporter {
     }
 
     public void reportFailure(Long taskInstanceId, Integer exitCode, String errorMessage) {
-        transition(
+        Result<TaskInstance> result = transitionWithResult(
                 taskInstanceId,
                 TaskInstanceStatus.RUNNING.getCode(),
                 TaskInstanceStatus.FAILED.getCode(),
                 exitCode,
                 errorMessage,
                 "执行失败");
+        if (result != null && result.isSuccess()) {
+            triggerRetryIfNeeded(result.getData(), errorMessage);
+        }
     }
 
     public void reportTimeout(Long taskInstanceId, String errorMessage) {
-        transition(
+        Result<TaskInstance> result = transitionWithResult(
                 taskInstanceId,
                 TaskInstanceStatus.RUNNING.getCode(),
                 TaskInstanceStatus.TIMEOUT.getCode(),
                 -1,
                 errorMessage,
                 "执行超时");
+        if (result != null && result.isSuccess()) {
+            triggerRetryIfNeeded(result.getData(), errorMessage);
+        }
+    }
+
+    private void triggerRetryIfNeeded(TaskInstance instance, String failReason) {
+        if (instance == null) return;
+        try {
+            taskRetryService.retryIfNeeded(instance, failReason != null ? failReason : "worker reported failure");
+        } catch (Exception e) {
+            log.error("Worker 上报失败后触发重试异常 taskInstanceId={}", instance.getId(), e);
+        }
     }
 
     public void reportConfigurationError(Long taskInstanceId, String errorMessage) {
@@ -68,6 +85,16 @@ public class TaskExecutionReporter {
     }
 
     private void transition(
+            Long taskInstanceId,
+            String fromStatus,
+            String toStatus,
+            Integer exitCode,
+            String errorMessage,
+            String reason) {
+        transitionWithResult(taskInstanceId, fromStatus, toStatus, exitCode, errorMessage, reason);
+    }
+
+    private Result<TaskInstance> transitionWithResult(
             Long taskInstanceId,
             String fromStatus,
             String toStatus,
@@ -86,19 +113,11 @@ public class TaskExecutionReporter {
 
         Result<TaskInstance> result = taskInstanceService.transitionStatus(taskInstanceId, request);
         if (result.isSuccess()) {
-            log.info(
-                    "任务状态已更新 taskInstanceId={} {} -> {}",
-                    taskInstanceId,
-                    fromStatus,
-                    toStatus);
-            return;
+            log.info("任务状态已更新 taskInstanceId={} {} -> {}", taskInstanceId, fromStatus, toStatus);
+        } else {
+            log.warn("任务状态更新未生效 taskInstanceId={} {} -> {} code={} message={}",
+                    taskInstanceId, fromStatus, toStatus, result.getCode(), result.getMessage());
         }
-        log.warn(
-                "任务状态更新未生效 taskInstanceId={} {} -> {} code={} message={}",
-                taskInstanceId,
-                fromStatus,
-                toStatus,
-                result.getCode(),
-                result.getMessage());
+        return result;
     }
 }

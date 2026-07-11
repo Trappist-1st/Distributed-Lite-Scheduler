@@ -17,6 +17,11 @@ public interface ResourceSlotService {
     // 预留任务所需资源并返回预留流水信息。
     Result<ReserveResourceResponse> reserve(ReserveResourceRequest request);
 
+    /**
+     * 调度器内部预留（无 JWT 租户上下文，通过 taskInstance 反查租户并校验一致性）。
+     */
+    Result<ReserveResourceResponse> reserveForScheduler(ReserveResourceRequest request);
+
     // 按预留流水释放资源槽位并回收配额。
     Result<Void> release(ReleaseResourceRequest request);
 

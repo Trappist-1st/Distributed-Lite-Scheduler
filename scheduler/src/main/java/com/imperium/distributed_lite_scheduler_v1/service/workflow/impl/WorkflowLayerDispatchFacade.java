@@ -120,7 +120,10 @@ public class WorkflowLayerDispatchFacade {
 
         for (WorkflowTaskInstance wtInstance : layerTasks) {
             try {
+                // 只调度 PENDING 状态的节点；DISPATCHED/RUNNING/终态均已处理，幂等跳过
                 if (!TaskInstanceStatus.PENDING.matches(wtInstance.getStatus())) {
+                    log.debug("跳过非PENDING节点 taskName={} status={}",
+                            wtInstance.getTaskName(), wtInstance.getStatus());
                     continue;
                 }
                 TaskInstance taskInstance = wtInstance.toTaskInstance(tenantId, effectiveSubmitUser);
@@ -132,8 +135,10 @@ public class WorkflowLayerDispatchFacade {
                 TaskSubmitResponse submitResponse = result.getData();
                 if (submitResponse != null && submitResponse.getTaskInstanceId() != null) {
                     wtInstance.setTaskInstanceId(submitResponse.getTaskInstanceId());
-                    workflowTaskInstanceMapper.updateById(wtInstance);
                 }
+                // 标记为 DISPATCHED，防止 dispatchLayer 重入时重复提交（DAG 推进幂等的关键屏障）
+                wtInstance.setStatus(TaskInstanceStatus.DISPATCHED.getCode());
+                workflowTaskInstanceMapper.updateById(wtInstance);
                 log.info(
                         "任务已提交到调度器 taskName={} workflowTaskInstanceId={} taskInstanceId={}",
                         wtInstance.getTaskName(),

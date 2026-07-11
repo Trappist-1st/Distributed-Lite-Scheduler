@@ -125,5 +125,36 @@ public interface TaskInstanceMapper extends BaseMapper<TaskInstance> {
             "LIMIT #{limit}"
     })
     List<TaskInstance> selectTimedOutRunningTasks(@Param("limit") int limit);
+
+    /**
+     * 更新执行器心跳时间（仅更新 RUNNING 状态的任务，防止误更新已终态任务）。
+     *
+     * @param taskInstanceId 任务实例 ID
+     * @return 更新行数（0 表示任务已不在 RUNNING 状态，执行器应停止）
+     */
+    @Update("UPDATE task_instance SET last_heartbeat_at = NOW(), updated_at = NOW() " +
+            "WHERE id = #{taskInstanceId} AND status = 'RUNNING'")
+    int updateHeartbeat(@Param("taskInstanceId") Long taskInstanceId);
+
+    /**
+     * 查询心跳超时的 RUNNING 任务（"僵尸任务"）。
+     * 触发场景：执行器 JVM crash / 节点宕机，导致心跳停止但 status 仍为 RUNNING。
+     * heartbeatBefore：上次心跳时间早于此时刻的任务视为僵尸（典型值 = NOW() - 30s）。
+     */
+    @Select("SELECT ti.* FROM task_instance ti " +
+            "WHERE ti.status = 'RUNNING' " +
+            "AND ti.last_heartbeat_at IS NOT NULL " +
+            "AND ti.last_heartbeat_at < #{heartbeatBefore} " +
+            "ORDER BY ti.last_heartbeat_at ASC " +
+            "LIMIT #{limit}")
+    List<TaskInstance> selectZombieRunningTasks(
+            @Param("heartbeatBefore") LocalDateTime heartbeatBefore,
+            @Param("limit") int limit);
+
+    /**
+     * 查询指定节点上所有 RUNNING 状态的任务实例（节点宕机恢复用）。
+     */
+    @Select("SELECT * FROM task_instance WHERE status = 'RUNNING' AND resource_node_id = #{nodeId}")
+    List<TaskInstance> selectRunningByNodeId(@Param("nodeId") Long nodeId);
 }
 

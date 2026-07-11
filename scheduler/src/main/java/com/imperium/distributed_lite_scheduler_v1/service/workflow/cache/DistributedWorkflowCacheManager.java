@@ -88,56 +88,55 @@ public class DistributedWorkflowCacheManager {
      * @return 执行计划对象
      */
     public WorkflowExecutionPlan getExecutionPlan(
-            Long workflowId, 
+            Long workflowId,
             Function<Long, WorkflowExecutionPlan> loader) {
-        
+
         if (workflowId == null) {
             throw new IllegalArgumentException("工作流 ID 不能为空");
         }
-        
-        // 第一步：尝试从 L1 本地缓存获取
-        WorkflowExecutionPlan plan = localCache.getIfPresent(workflowId);
-        if (plan != null) {
-            log.debug("缓存命中：L1本地缓存 workflowId={}", workflowId);
-            return plan;
-        }
-        
-        // 第二步：尝试从 L2 Redis 获取
+
+        // 使用 Caffeine 的 get(key, mappingFunction) 而非 getIfPresent()。
+        // 区别：同一个 key 并发时只有一个线程执行 mappingFunction，其他线程等待并复用结果，
+        // 消灭进程内缓存击穿（原先 1000 个并发全部穿透到下游）。
+        return localCache.get(workflowId, id -> loadFromRedisOrDb(id, loader));
+    }
+
+    /**
+     * L1 miss 后的加载链：L2 Redis → DB，加载成功后双写回 L1+L2。
+     * 此方法在 Caffeine per-key 锁内执行，单 JVM 内不会并发。
+     * 跨 JVM 的并发穿透由 Redis 的最终一致性承担（多次 DB 加载结果相同，可接受）。
+     */
+    private WorkflowExecutionPlan loadFromRedisOrDb(Long workflowId, Function<Long, WorkflowExecutionPlan> loader) {
+        // 第一步：尝试从 L2 Redis 获取
         String redisKey = CACHE_KEY_PREFIX + workflowId;
         try {
             RBucket<Object> bucket = redissonClient.getBucket(redisKey);
             Object cached = bucket.get();
             if (cached != null) {
                 try {
-                    plan = objectMapper.readValue(
-                        objectMapper.writeValueAsString(cached), 
-                        WorkflowExecutionPlan.class
-                    );
-                    // 回源到本地缓存（L1），加速后续访问
-                    localCache.put(workflowId, plan);
+                    WorkflowExecutionPlan plan = objectMapper.readValue(
+                            objectMapper.writeValueAsString(cached),
+                            WorkflowExecutionPlan.class);
                     log.debug("缓存命中：L2 Redis缓存 workflowId={}", workflowId);
                     return plan;
                 } catch (Exception e) {
                     log.warn("反序列化 Redis 缓存失败，继续查询数据库 workflowId={}", workflowId, e);
-                    // 反序列化失败，继续回源数据库
                 }
             }
         } catch (Exception e) {
             log.warn("访问 Redis 缓存异常，继续查询数据库 workflowId={}", workflowId, e);
-            // Redis 异常不影响业务流程，继续查询数据库
         }
-        
-        // 第三步：缓存未命中，调用 loader 从数据库加载
+
+        // 第二步：缓存未命中，从数据库加载
         log.debug("缓存未命中，从数据库加载 workflowId={}", workflowId);
-        plan = loader.apply(workflowId);
-        
-        // 第四步：双写入缓存（L1 + L2）
+        WorkflowExecutionPlan plan = loader.apply(workflowId);
+
+        // 第三步：回填 L2 Redis（L1 由 Caffeine.get() 在返回后自动填充）
         if (plan != null) {
-            localCache.put(workflowId, plan);
             putToRedis(workflowId, plan);
-            log.info("数据库加载并缓存成功 workflowId={}", workflowId);
+            log.info("数据库加载并写入 L2 缓存成功 workflowId={}", workflowId);
         }
-        
+
         return plan;
     }
     

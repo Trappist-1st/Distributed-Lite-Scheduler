@@ -77,6 +77,7 @@ public class Task {
     /**
      * 资源需求（JSON）
      */
+    @TableField("resource_require")
     private String resourceRequirement;
     
     /**

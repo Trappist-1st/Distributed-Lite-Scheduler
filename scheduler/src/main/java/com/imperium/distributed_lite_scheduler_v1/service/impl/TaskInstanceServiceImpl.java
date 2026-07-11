@@ -2,12 +2,9 @@ package com.imperium.distributed_lite_scheduler_v1.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskInstanceMapper;
-import com.imperium.distributed_lite_scheduler_v1.mapper.TaskMapper;
 import com.imperium.distributed_lite_scheduler_v1.mapper.TaskStatusChangeLogMapper;
 import com.imperium.distributed_lite_scheduler_v1.model.dto.InternalTaskInstanceStatusTransitionRequest;
-import com.imperium.distributed_lite_scheduler_v1.model.entity.Task;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.TaskInstance;
 import com.imperium.distributed_lite_scheduler_v1.model.entity.TaskStatusChangeLog;
 import com.imperium.distributed_lite_scheduler_v1.service.TaskInstanceService;
@@ -45,13 +42,12 @@ public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, Tas
     private static final Map<String, Set<String>> ALLOWED_TRANSITIONS = Map.of(
             STATUS_PENDING, Set.of(STATUS_RUNNING, STATUS_CANCELLED),
             STATUS_RUNNING, Set.of(STATUS_SUCCESS, STATUS_FAILED, STATUS_CANCELLED, STATUS_TIMEOUT),
-            STATUS_FAILED, Set.of(STATUS_PENDING),
-            STATUS_TIMEOUT, Set.of(STATUS_PENDING),
             STATUS_SUCCESS, Set.of(),
-            STATUS_CANCELLED, Set.of()
+            STATUS_FAILED, Set.of(),
+            STATUS_CANCELLED, Set.of(),
+            STATUS_TIMEOUT, Set.of()
     );
 
-    private final TaskMapper taskMapper;
     private final TaskStatusChangeLogMapper taskStatusChangeLogMapper;
 
     @Autowired
@@ -59,12 +55,8 @@ public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, Tas
 
     @Autowired
     private TaskInstanceTerminalHandler taskInstanceTerminalHandler;
-    
-    @Autowired
-    private ObjectMapper objectMapper;
 
-    public TaskInstanceServiceImpl(TaskMapper taskMapper, TaskStatusChangeLogMapper taskStatusChangeLogMapper) {
-        this.taskMapper = taskMapper;
+    public TaskInstanceServiceImpl(TaskStatusChangeLogMapper taskStatusChangeLogMapper) {
         this.taskStatusChangeLogMapper = taskStatusChangeLogMapper;
     }
 
@@ -110,16 +102,6 @@ public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, Tas
             return Result.failure(ResultCode.CONFLICT, "当前状态不匹配，期望 " + fromStatus + "，实际 " + currentStatus);
         }
 
-        //乐观锁更新状态机，保证并发安全；同时根据目标状态设置开始/结束时间。（我第一次实际使用乐观锁，确实是个不错的解决方案，避免了分布式锁的复杂性和性能问题）
-        //首先获取时间戳，然后构造更新条件：id匹配、当前状态匹配、版本号匹配
-        if (isRetryTransition(fromStatus, toStatus)) {
-            int maxRetryTimes = resolveMaxRetryTimes(current.getTaskId());
-            int currentRetry = current.getRetryCount() == null ? 0 : current.getRetryCount();
-            if (currentRetry >= maxRetryTimes) {
-                return Result.failure(ResultCode.BAD_REQUEST, "重试次数已达上限: " + maxRetryTimes);
-            }
-        }
-
         LocalDateTime now = LocalDateTime.now();
         LambdaUpdateWrapper<TaskInstance> uw = new LambdaUpdateWrapper<TaskInstance>()
                 .eq(TaskInstance::getId, taskInstanceId)
@@ -150,18 +132,6 @@ public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, Tas
                         StringUtils.hasText(request.errorMessage()) ? request.errorMessage().trim() : null);
             }
         }
-        if (isRetryTransition(fromStatus, toStatus)) {
-            int currentRetry = current.getRetryCount() == null ? 0 : current.getRetryCount();
-            uw.set(TaskInstance::getRetryCount, currentRetry + 1);
-            uw.set(TaskInstance::getScheduledTime, now);
-            uw.set(TaskInstance::getResourceNodeId, null);
-            uw.set(TaskInstance::getStartTime, null);
-            uw.set(TaskInstance::getEndTime, null);
-            uw.set(TaskInstance::getDurationMs, null);
-            uw.set(TaskInstance::getExitCode, null);
-            uw.set(TaskInstance::getErrorMessage, null);
-        }
-
         //执行乐观锁更新，update(null, uw)：第一个参数为 null，表示完全由 Wrapper 指定更新内容
         //生成的 SQL 类似：
         /*UPDATE task_instance
@@ -189,22 +159,6 @@ public class TaskInstanceServiceImpl extends ServiceImpl<TaskInstanceMapper, Tas
         }
         
         return Result.success(latest);
-    }
-
-    private int resolveMaxRetryTimes(Long taskId) {
-        if (taskId == null) {
-            return 0;
-        }
-        Task task = taskMapper.selectById(taskId);
-        if (task == null || task.getRetryTimes() == null || task.getRetryTimes() < 0) {
-            return 0;
-        }
-        return task.getRetryTimes();
-    }
-
-    private static boolean isRetryTransition(String fromStatus, String toStatus) {
-        return STATUS_PENDING.equals(toStatus)
-                && (STATUS_FAILED.equals(fromStatus) || STATUS_TIMEOUT.equals(fromStatus));
     }
 
     private void persistStatusChangeLog(Long taskInstanceId,

@@ -46,4 +46,13 @@ public class TaskSubmitRequest {
 
     /** 工作流实例 ID（工作流编排提交时由引擎填充） */
     private Long workflowInstanceId;
+
+    /** 触发类型：MANUAL/API/WORKFLOW/RETRY/CRON（系统内部填充，用户无需设置） */
+    private String triggerType;
+
+    /** 当前重试次数（重试场景由 TaskRetryService 填充） */
+    private Integer retryCount;
+
+    /** 预定执行时间（为空立即调度；重试延迟场景由 TaskRetryService 填充） */
+    private LocalDateTime scheduledTime;
 }

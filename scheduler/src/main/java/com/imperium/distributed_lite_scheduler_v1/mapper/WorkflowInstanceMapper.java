@@ -36,29 +36,8 @@ public interface WorkflowInstanceMapper extends BaseMapper<WorkflowInstance> {
     int incrementFailedTasks(@Param("instanceId") Long instanceId);
     
     /**
-     * 根据工作流ID查询实例列表
-     * 
-     * @param workflowId 工作流ID
-     * @return 实例列表
+     * 查询所有 RUNNING 状态的工作流实例，供 ReconciliationWorker 扫描卡死工作流使用。
      */
-    @Select("SELECT * FROM workflow_instance WHERE workflow_id = #{workflowId}")
-    List<WorkflowInstance> selectByWorkflowId(@Param("workflowId") Long workflowId);
-    
-    /**
-     * 根据状态查询实例列表
-     * 
-     * @param status 状态
-     * @return 实例列表
-     */
-    @Select("SELECT * FROM workflow_instance WHERE status = #{status}")
-    List<WorkflowInstance> selectByStatus(@Param("status") String status);
-    
-    /**
-     * 查询正在运行的实例数量
-     * 
-     * @param workflowId 工作流ID
-     * @return 运行中的实例数量
-     */
-    @Select("SELECT COUNT(*) FROM workflow_instance WHERE workflow_id = #{workflowId} AND status = 'RUNNING'")
-    int countRunningInstances(@Param("workflowId") Long workflowId);
+    @Select("SELECT * FROM workflow_instance WHERE status = 'RUNNING' ORDER BY created_at ASC LIMIT #{limit}")
+    List<WorkflowInstance> selectRunningInstances(@Param("limit") int limit);
 }

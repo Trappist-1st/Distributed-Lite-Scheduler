@@ -16,5 +16,8 @@ public class WorkerRunCallback {
 
     private String statusTransitionUrl;
 
+    /** 任务级心跳 URL（Worker 执行期间定期 POST，更新 last_heartbeat_at）。 */
+    private String heartbeatUrl;
+
     private String internalToken;
 }

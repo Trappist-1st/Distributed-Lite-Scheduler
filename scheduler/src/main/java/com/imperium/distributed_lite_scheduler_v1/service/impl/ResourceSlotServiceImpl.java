@@ -102,6 +102,22 @@ public class ResourceSlotServiceImpl implements ResourceSlotService {
             return Result.failure(ResultCode.FORBIDDEN, "租户上下文与请求不一致");
         }
 
+        return doReserve(request);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Result<ReserveResourceResponse> reserveForScheduler(ReserveResourceRequest request) {
+        if (request == null) {
+            return Result.failure(ResultCode.BAD_REQUEST, "请求不能为空");
+        }
+        if (request.tenantId() == null) {
+            return Result.failure(ResultCode.BAD_REQUEST, "租户ID不能为空");
+        }
+        return doReserve(request);
+    }
+
+    private Result<ReserveResourceResponse> doReserve(ReserveResourceRequest request) {
         int cpu = request.cpu();
         int mem = request.memoryMb();
         int gpu = request.gpu();

@@ -1,6 +1,7 @@
 package com.imperium.distributed_lite_worker.service;
 
 import com.imperium.distributed_lite_worker.config.WorkerProperties;
+import com.imperium.distributed_lite_worker.dto.WorkerRunCallback;
 import com.imperium.distributed_lite_worker.dto.WorkerRunRequest;
 import com.imperium.distributed_lite_worker.executor.ExecutionResult;
 import com.imperium.distributed_lite_worker.executor.LocalRunSpec;
@@ -11,10 +12,15 @@ import com.imperium.distributed_lite_worker.runtime.WorkerRunAcceptanceRegistry;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.nio.file.Path;
 import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 @Service
@@ -26,6 +32,13 @@ public class WorkerRunService {
     private final RunningTaskRegistry runningTaskRegistry;
     private final WorkerRunAcceptanceRegistry acceptanceRegistry;
     private final Executor workerTaskExecutor;
+
+    /** 单线程守护池，用于任务执行期间的心跳调度，不影响任务线程池资源。 */
+    private final ScheduledExecutorService heartbeatExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "worker-task-heartbeat");
+        t.setDaemon(true);
+        return t;
+    });
 
     public WorkerRunService(
             WorkerProperties properties,
@@ -78,6 +91,7 @@ public class WorkerRunService {
 
     private void executeSync(WorkerRunRequest request) {
         log.info("Worker 执行任务 taskInstanceId={} type={}", request.getTaskInstanceId(), request.getTaskType());
+        ScheduledFuture<?> heartbeat = startHeartbeat(request);
         try {
             WorkerTaskTypeExecutor executor = executorRegistry.resolve(request.getTaskType()).orElse(null);
             if (executor == null) {
@@ -106,6 +120,25 @@ public class WorkerRunService {
             log.error("Worker 任务执行异常 taskInstanceId={}", request.getTaskInstanceId(), e);
             schedulerCallbackClient.report(
                     request.getCallback(), ExecutionResult.failure(-1, null, null, e.getMessage()));
+        } finally {
+            stopHeartbeat(heartbeat);
+        }
+    }
+
+    private ScheduledFuture<?> startHeartbeat(WorkerRunRequest request) {
+        WorkerRunCallback callback = request.getCallback();
+        if (callback == null || !StringUtils.hasText(callback.getHeartbeatUrl())) {
+            return null;
+        }
+        long intervalSeconds = Math.max(properties.getHeartbeatIntervalSeconds() / 2L, 10L);
+        return heartbeatExecutor.scheduleWithFixedDelay(
+                () -> schedulerCallbackClient.heartbeat(callback, request.getTaskInstanceId()),
+                intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
+    }
+
+    private static void stopHeartbeat(ScheduledFuture<?> future) {
+        if (future != null) {
+            future.cancel(false);
         }
     }
 }

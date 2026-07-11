@@ -33,13 +33,6 @@ public class SchedulerProperties {
     private String leaderLockKey = "scheduler:leader:lock";
 
     /**
-     * 已废弃：Leader 锁使用 Watchdog（{@code tryLock(0, -1, MILLISECONDS)}），不再读此租约。
-     * 保留配置项仅为兼容旧环境变量，将在后续版本移除。
-     */
-    @Deprecated
-    private int leaderLockLeaseSeconds = 30;
-
-    /**
      * 单任务调度锁获取最长等待（秒）；持锁后 Watchdog 续期，无固定 lease。
      */
     private int taskLockWaitSeconds = 1;

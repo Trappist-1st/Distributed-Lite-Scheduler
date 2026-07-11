@@ -19,6 +19,9 @@ public class WorkerExecutorConfig {
         executor.setMaxPoolSize(exec.getMaxPoolSize());
         executor.setQueueCapacity(exec.getQueueCapacity());
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.AbortPolicy());
+        // 优雅停机：Spring 关闭时等待正在执行的任务完成，最多 30 秒
+        executor.setWaitForTasksToCompleteOnShutdown(true);
+        executor.setAwaitTerminationSeconds(30);
         executor.initialize();
         return executor;
     }

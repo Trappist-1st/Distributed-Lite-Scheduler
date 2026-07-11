@@ -12,6 +12,7 @@ import lombok.Getter;
 public enum TaskInstanceStatus {
 
     PENDING("PENDING", "等待执行"),
+    DISPATCHED("DISPATCHED", "已提交调度器"),
     RUNNING("RUNNING", "执行中"),
     SUCCESS("SUCCESS", "成功"),
     FAILED("FAILED", "失败"),

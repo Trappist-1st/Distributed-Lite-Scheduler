@@ -81,6 +81,39 @@ public class SchedulerLeaderElection {
         return leader;
     }
 
+    /**
+     * 以 Leader 身份独立执行一段逻辑（适用于 Watchdog、ReconciliationWorker 等周期性任务）。
+     *
+     * <p>与 {@link #tryAcquireLeadership()} + {@link #releaseLeadership()} 不同，本方法：
+     * <ul>
+     *   <li>独立申请并释放 Leader 锁，不影响 {@link #isLeader()} 标志（保留给调度主循环）</li>
+     *   <li>在 finally 中确保锁释放，避免持锁过久</li>
+     * </ul>
+     *
+     * @param action 需要在 Leader 身份下执行的逻辑
+     * @return true 表示成功获得 Leader 锁并执行了 action；false 表示未获得锁（非 Leader）
+     */
+    public boolean executeIfLeader(Runnable action) {
+        RLock lock = leaderLock();
+        try {
+            boolean acquired = lock.tryLock(0, -1, TimeUnit.MILLISECONDS);
+            if (!acquired) {
+                return false;
+            }
+            try {
+                action.run();
+                return true;
+            } finally {
+                if (lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
     private RLock leaderLock() {
         return redissonClient.getLock(schedulerProperties.getLeaderLockKey());
     }

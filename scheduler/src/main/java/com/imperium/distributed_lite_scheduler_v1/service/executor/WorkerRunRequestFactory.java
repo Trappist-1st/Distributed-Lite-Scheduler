@@ -23,11 +23,11 @@ public class WorkerRunRequestFactory {
 
     public WorkerRunRequest fromRunSpec(RunSpec runSpec, ResourceNode node) {
         String baseUrl = trimTrailingSlash(taskExecutorProperties.getSchedulerPublicBaseUrl());
-        String statusUrl =
-                baseUrl + "/api/internal/task-instances/" + runSpec.getTaskInstanceId() + "/status";
+        String instanceBase = baseUrl + "/api/internal/task-instances/" + runSpec.getTaskInstanceId();
 
         WorkerRunCallback callback = WorkerRunCallback.builder()
-                .statusTransitionUrl(statusUrl)
+                .statusTransitionUrl(instanceBase + "/status")
+                .heartbeatUrl(instanceBase + "/heartbeat")
                 .internalToken(internalApiToken)
                 .build();
 

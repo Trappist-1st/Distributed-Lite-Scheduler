@@ -60,33 +60,4 @@ public class WorkflowExecutorConfig {
         return executor;
     }
     
-    /**
-     * 创建工作流实例异步执行线程池
-     * 
-     * 用于异步启动工作流实例
-     * 
-     * TODO: 根据实际业务场景调整参数
-     */
-    @Bean(name = "workflowInstanceAsyncExecutor")
-    public ExecutorService workflowInstanceAsyncExecutor() {
-        int corePoolSize = 10;
-        int maximumPoolSize = 20;
-        long keepAliveTime = 60L;
-        
-        log.info("初始化工作流实例异步执行线程池, corePoolSize={}, maximumPoolSize={}", 
-                corePoolSize, maximumPoolSize);
-        
-        ThreadPoolExecutor executor = new ThreadPoolExecutor(
-                corePoolSize,
-                maximumPoolSize,
-                keepAliveTime,
-                TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(500),
-                new ThreadPoolExecutor.CallerRunsPolicy()
-        );
-        
-        executor.allowCoreThreadTimeOut(true);
-        
-        return executor;
-    }
 }

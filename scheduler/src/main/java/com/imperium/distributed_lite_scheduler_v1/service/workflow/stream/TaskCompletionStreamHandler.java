@@ -46,6 +46,20 @@ public class TaskCompletionStreamHandler {
         }
 
         for (WorkflowTaskInstance wtInstance : workflowTaskInstances) {
+            // 幂等保护：workflow_task_instance 已为终态说明此事件已被成功处理过，直接跳过
+            // 触发场景：consumer group reset、XCLAIM 重投、手动 replay
+            try {
+                TaskInstanceStatus currentStatus = TaskInstanceStatus.fromCode(wtInstance.getStatus());
+                if (currentStatus.isTerminal()) {
+                    log.info("幂等跳过：workflow_task_instance 已为终态，忽略重复事件 "
+                                    + "workflowTaskInstanceId={} currentStatus={} eventTaskInstanceId={}",
+                            wtInstance.getId(), wtInstance.getStatus(), event.getTaskInstanceId());
+                    continue;
+                }
+            } catch (IllegalArgumentException ignored) {
+                // 未知状态，继续正常处理
+            }
+
             if (TaskInstanceStatus.SUCCESS.matches(event.getStatus())) {
                 handleTaskSuccess(wtInstance, event);
             } else if (TaskInstanceStatus.FAILED.matches(event.getStatus())
