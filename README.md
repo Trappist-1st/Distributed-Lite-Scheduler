@@ -1,724 +1,586 @@
-# Distributed Lite Scheduler V1
+# Distributed Lite Scheduler
 
-> 🎯 **面向中小团队的生产级轻量分布式调度平台**  
-> 对标：XXL-Job（简化版）+ Kubernetes Job Scheduler（概念级）+ Apache Airflow（轻量版）
+| Category | Badges |
+|------------|-------------------------------------------------------------------------------------------------------------------------------|
+| License | [![License](https://img.shields.io/badge/License-MIT-green)](#license) |
+| Language | [![Java](https://img.shields.io/badge/Java-21-blue)](https://www.oracle.com/java/) [![Maven](https://img.shields.io/badge/Maven-3.6%2B-red)](https://maven.apache.org/) |
+| Framework | [![Spring Boot](https://img.shields.io/badge/Spring%20Boot-4.0.5-brightgreen)](https://spring.io/projects/spring-boot) [![MyBatis Plus](https://img.shields.io/badge/MyBatis%20Plus-3.5.15-blue)](https://baomidou.com/) |
+| Storage | [![MySQL](https://img.shields.io/badge/MySQL-8.0-orange)](https://www.mysql.com/) [![Redis](https://img.shields.io/badge/Redis-7-red)](https://redis.io/) |
+| Containers | [![Docker](https://img.shields.io/badge/Docker-Compose-blue)](https://www.docker.com/) [![Redisson](https://img.shields.io/badge/Redisson-4.0.0-red)](https://github.com/redisson/redisson) |
+| Dev tools | [![Swagger](https://img.shields.io/badge/OpenAPI-Swagger-green)](https://springdoc.org/) [![JWT](https://img.shields.io/badge/JWT-JJWT%200.12.6-blue)](https://github.com/jwtk/jjwt) |
 
-[![Language](https://img.shields.io/badge/Language-Java-blue)](https://www.java.com/)
-[![Framework](https://img.shields.io/badge/Framework-Spring%20Boot%204.0-brightgreen)](https://spring.io/projects/spring-boot)
-[![License](https://img.shields.io/badge/License-MIT-green)](#license)
-
----
-
-## 📋 目录
-
-- [产品概述](#产品概述)
-- [系统架构](#系统架构)
-- [核心特性](#核心特性)
-- [快速开始](#快速开始)
-- [项目结构](#项目结构)
-- [主要功能模块](#主要功能模块)
-- [技术栈](#技术栈)
-- [开发计划](#开发计划)
-- [文档指南](#文档指南)
-- [贡献指南](#贡献指南)
-- [许可证](#许可证)
+| Module | Status |
+|---------|----------------------------------------------------------------------------------------------------------------|
+| Scheduler (control plane) | [![Build](https://img.shields.io/badge/build-passing-brightgreen)](scheduler/) |
+| Worker (remote executor) | [![Build](https://img.shields.io/badge/build-passing-brightgreen)](worker/) |
 
 ---
 
-## 🎯 产品概述
+[Distributed Lite Scheduler](#) (or simply **DLS**) is a platform to programmatically author, schedule, and monitor resource-aware workflows for small and medium-sized teams.
 
-### 产品定位
+When workflows are defined as code, they become more maintainable, versionable, testable, and collaborative. DLS extends the classic task-scheduler pattern with **resource-aware scheduling**, **multi-tenancy**, and **DAG workflow orchestration** — combining the simplicity of XXL-Job, the resource-management concepts of Kubernetes, and the DAG model of Apache Airflow in a lightweight Spring Boot package.
 
-Distributed Lite Scheduler 是一个为中小团队设计的轻量级分布式任务调度平台，适用于如下场景：
-
-#### 目标用户
-
-- 📊 **数据团队**：ETL任务编排、模型训练调度、数据同步
-- 💻 **开发团队**：定时任务管理、批处理任务执行、定期清理任务
-- 🤖 **AI团队**：GPU资源调度、训练任务排队、推理任务管理
-
-#### 为什么选择本项目而不是XXL-Job？
-
-| 对标项目 | Distributed Lite Scheduler | 优势 |
-|---------|---------------------------|------|
-| XXL-Job | ✅ 任务调度、定时任务 | **+资源感知、多租户、DAG工作流** |
-| Kubernetes | ✅ 分布式执行、资源管理 | **轻量级、易部署、学习曲线平缓** |
-| Airflow | ✅ DAG工作流、依赖编排 | **更轻松、更易集成、资源调度** |
-
-### 核心价值主张
-
-✅ **资源感知调度** - CPU/GPU/内存限制，防止任务互相压垮  
-✅ **DAG工作流支持** - 任务依赖编排，支持复杂流程  
-✅ **多租户资源隔离** - 每个租户独立的资源配额和成本管理  
-✅ **可视化监控面板** - 实时任务状态、资源使用、告警  
-✅ **插件化执行器** - 支持Shell/Python/Docker/HTTP等多种执行方式  
-✅ **生产级可靠性** - 分布式锁、乐观锁、幂等性设计  
+The DLS scheduler executes your tasks on an array of remote workers while following the specified dependencies and respecting CPU / memory / GPU quotas per tenant. Rich REST APIs and Swagger UI make performing complex surgeries on workflows a snap. The pluggable executor model (Shell / Python / Docker / HTTP) makes it easy to integrate with almost any existing data, dev, or AI pipeline.
 
 ---
 
-## 🏗️ 系统架构
+## Requirements
 
-### 整体架构图
+Distributed Lite Scheduler is tested with:
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Web UI / CLI / OpenAPI                  │
-│              [任务管理] [资源监控] [报表统计]                  │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-┌──────────────────────▼──────────────────────────────────────┐
-│                   API Gateway (Spring Cloud Gateway)         │
-│              [限流] [认证] [熔断] [日志追踪]                    │
-└──────────────────────┬──────────────────────────────────────┘
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-┌───────▼──────┐ ┌────▼─────┐ ┌──────▼──────┐
-│ Scheduler    │ │ Executor │ │ Monitor     │
-│ 调度核心模块    │ │ 执行器集群 │ │ 监控告警模块  │
-│              │ │          │ │            │
-│ • Leader选举 │ │• 任务执行  │ │• 实时告警   │
-│ • DAG解析    │ │• 状态上报  │ │• 性能采集   │
-│ • 调度决策    │ │• 日志收集  │ │• 可视化    │
-└───────┬──────┘ └────┬─────┘ └──────┬──────┘
-        │              │              │
-        └──────────────┼──────────────┘
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-┌───────▼──────┐ ┌────▼─────┐ ┌──────▼──────┐
-│ MySQL/PG     │ │ Redis    │ │ MinIO/OSS   │
-│ 元数据存储     │ │ 分布式锁  │ │ 日志存储     │
-│              │ │ 任务队列  │ │ 归档数据     │
-│ • 任务定义    │ │ 状态缓存  │ │            │
-│ • 执行历史    │ │          │ │            │
-│ • 资源配置    │ │          │ │            │
-└──────────────┘ └──────────┘ └─────────────┘
-```
+| | Scheduler | Worker |
+|------------|----------------------------------|----------------------------------|
+| Java | 21 | 21 |
+| Spring Boot | 4.0.5 | 4.0.5 |
+| Maven | 3.6+ | 3.6+ |
+| MySQL | 8.0 | — |
+| Redis | 7.0+ | — |
+| Platform | AMD64 / ARM64 (Linux, macOS, Windows) | AMD64 / ARM64 (Linux, macOS, Windows) |
+| Docker | Optional (recommended for deployment) | Optional (recommended for deployment) |
 
-### 核心设计原则
+**Note**: MySQL is the only metadata store tested in CI. PostgreSQL is on the roadmap but not yet verified.
 
-1. **高可用** - 支持多Scheduler实例，通过Redis分布式锁自动选举主节点
-2. **高可靠** - 任务持久化、断点续传、自动重试、失败告警
-3. **高效率** - 异步处理、分批操作、缓存策略、资源预留
-4. **易运维** - 清晰的日志、指标可观测、快速问题定位
+**Note**: The worker runs subprocesses (`shell`, `python`) and spawns Docker containers (`docker`) on the host it is deployed on. In production you should only run workers on Linux-based distros and isolate them via containers or namespaces.
 
 ---
 
-## ⭐ 核心特性
+## Getting started
 
-### 1. 资源感知调度（Resource-Aware Scheduling）
+Visit the official documentation in the [`docs/`](docs) folder for help with [installing DLS](#installation), [getting started](#quick-start), or walking through a more complete [tutorial](docs/PROJECT_PLAN.md).
 
-本系统区别于其他调度器的最大特点：**不仅调度任务，还调度资源**
+> Note: If you're looking for the latest design documents (development branch), you can find them in [docs/](docs).
 
-```
-传统调度器 (XXL-Job):
-任务 A: CPU 4核 → 节点1 (已有8个任务，每个2核)
-       内存不足,任务卡顿 ❌
+For more information on rollout designs and per-phase implementation plans, visit the [Project Plan](docs/PROJECT_PLAN.md) and the dedicated design documents under `docs/P*_*_DESIGN.md`.
 
-本系统 (Distributed Lite Scheduler):
-任务 A: 需要 CPU 4核、内存 8GB
-检查配额 ✅ → 查询可用节点 ✅ → 预留资源 ✅ → 调度执行 ✅
-不会因资源争抢而导致任务失败
-```
-
-**支持管理的异构资源：**
-- CPU 核数
-- 内存 (GB/MB)
-- GPU 卡数 + GPU型号
-
-### 2. 多租户隔离（Multi-Tenancy）
-
-每个租户拥有：
-- 独立的资源配额上限 (CPU/内存/GPU)
-- 独立的任务命名空间
-- 独立的成本统计和审计日志
-- **确保资源公平分配，防止某个租户独占所有资源**
-
-### 3. DAG工作流编排（Workflow DAG）
-
-支持复杂的任务依赖关系：
-
-```
-    ┌─→ Task B
-Task A─┤
-    └─→ Task C
-         ↓
-      Task D
-```
-
-特性：
-- 拓扑排序自动解析依赖
-- 支持条件分支和动态分支
-- 失败自动重试或告警
-- 支持手动重跑某个失败tasks
-
-### 4. 多种执行器（Pluggable Executors）
-
-- **Shell Executor** - 执行Shell脚本
-- **Python Executor** - 执行Python脚本和数据处理任务
-- **Docker Executor** - 容器化执行，环境隔离
-- **HTTP Executor** - 远程调用外部服务
-- **Java Executor** - 调用Java方法/类（扩展点）
-
-### 5. 分布式一致性保障（Distributed Consistency）
-
-**Redis分布式锁 (Redisson)**
-- **Scheduler Leader选举**：多实例环境下通过Redis锁自动选举主调度器，避免重复调度
-- **任务调度互斥锁**：防止同一任务被多个Scheduler实例同时调度
-- **资源分配锁**：保证多个任务竞争同一资源节点时的互斥访问
-- **Watch Dog自动续期**：Redisson自动续期机制，防止业务执行时间超过锁超时时间
-
-**数据库乐观锁**
-- 任务状态更新时的并发控制
-- 资源节点可用量更新的并发控制
-- 防止并发更新导致的数据不一致
-
-**幂等性设计**
-- 任务ID去重，防止重复执行
-- 消息消费端的幂等性处理
-
-### 6. 高级调度算法 (Advanced Scheduling Algorithms)
-
-- **Fair Scheduling** - 多租户公平调度，避免某个租户任务堆积
-- **Priority Queue** - 优先级队列（堆实现），支持任务优先级
-- **Backfill Scheduling** - 资源填充算法（借鉴HPC调度），充分利用资源空间
-- **Preemption** - 任务抢占机制（可选），高优先级任务可抢占低优先级任务
+Documentation for dependent modules — the remote worker, Docker image, Docker Compose stack — you'll find in [docker-compose.yml](docker-compose.yml), [scheduler/Dockerfile](scheduler/Dockerfile), and [worker/Dockerfile](worker/Dockerfile).
 
 ---
 
-## 🚀 快速开始
+## Installation
 
-### 环境要求
+For comprehensive instructions on setting up your local development environment, please refer to this section. The fastest path is via Docker Compose, which brings up MySQL, Redis, the scheduler, and a worker in a single command.
 
-- **Java**: 21+
-- **Maven**: 3.6+
-- **MySQL**: 5.7+ 或 PostgreSQL 12+
-- **Redis**: 6.0+
-- **Docker** (可选，用于容器化执行或开发环境)
-
-### 本地开发环境搭建
-
-#### 1. 克隆仓库
+### 1. Clone the repository
 
 ```bash
 git clone https://github.com/yourusername/Distributed-Lite-Scheduler-V1.git
 cd Distributed-Lite-Scheduler-V1
 ```
 
-#### 2. 配置数据库
+### 2. Configure environment
 
-**创建数据库和表**
-
-```bash
-# 使用提供的SQL脚本初始化
-mysql -u root -p < docs/schema.sql
-mysql -u root -p < docs/init-data.sql
-
-# 或用PostgreSQL
-psql -U postgres -f docs/schema.sql
-psql -U postgres -f docs/init-data.sql
-```
-
-#### 3. 配置Redis
+Copy `.env.example` to `.env` and adjust credentials:
 
 ```bash
-# 本地启动Redis（需预装Redis）
-redis-server
-
-# 或使用Docker
-docker run -d -p 6379:6379 redis:7.0
+cp .env.example .env
+# edit .env: JWT_SECRET, INTERNAL_API_TOKEN, WORKER_API_TOKEN, DB credentials
 ```
 
-#### 4. 修改配置文件
-
-编辑 `src/main/resources/application.yaml`：
-
-```yaml
-server:
-  port: 8080
-
-spring:
-  datasource:
-    url: jdbc:mysql://localhost:3306/scheduler_db
-    username: root
-    password: your_password
-    driver-class-name: com.mysql.cj.jdbc.Driver
-  
-  redis:
-    host: localhost
-    port: 6379
-    password: 
-    database: 0
-
-mybatis-plus:
-  mapper-locations: classpath:/mapper/**/*.xml
-  type-aliases-package: com.imperium.distributed_lite_scheduler_v1.model.entity
-
-logging:
-  level:
-    com.imperium: DEBUG
-    org.springframework: INFO
-```
-
-#### 5. 编译和运行
+### 3. Start the stack
 
 ```bash
-# 清理并编译
-mvn clean install
+# Bring up MySQL + Redis + scheduler + worker (auto-creates schema & init data)
+docker compose up -d --build
 
-# 启动应用
-mvn spring-boot:run
-
-# 或使用IDE直接运行
-# DistributedLiteSchedulerV1Application.java
+# Scale workers horizontally
+docker compose up -d --scale worker=3
 ```
 
-#### 6. 验证启动
+The scheduler is reachable at <http://localhost:8080>, the worker at <http://localhost:9090>.
+
+### 4. Verify the install
 
 ```bash
-# 检查应用是否启动成功
-curl http://localhost:8080/api/health
+# Scheduler health
+curl http://localhost:8080/actuator/health
+# {"status":"UP"}
 
-# 返回示例
-# {"status": "UP", "database": "MySQL", "redis": "connected"}
+# OpenAPI / Swagger UI
+# http://localhost:8080/swagger-ui.html
 ```
 
 ---
 
-## 📁 项目结构
+## Quick start (without Docker)
+
+If you prefer to run the scheduler and worker directly with Maven / an IDE:
+
+1. Start MySQL 8.0 and Redis 7 locally.
+2. Initialize the schema:
+
+   ```bash
+   mysql -u root -p < docs/schema-complete.sql
+   mysql -u root -p < docs/init-data.sql
+   ```
+
+3. Build the multi-module project:
+
+   ```bash
+   mvn clean install -DskipTests
+   ```
+
+4. Run the scheduler (control plane):
+
+   ```bash
+   cd scheduler
+   mvn spring-boot:run
+   # or run DistributedLiteSchedulerV1Application from your IDE
+   ```
+
+5. Run a worker (remote executor):
+
+   ```bash
+   cd worker
+   mvn spring-boot:run
+   # or run DistributedLiteWorkerApplication from your IDE
+   ```
+
+6. Open Swagger UI at <http://localhost:8080/swagger-ui.html> and submit your first task via `POST /api/task/submit`.
+
+---
+
+## Official source code
+
+This repository is the canonical source of Distributed Lite Scheduler. Released versions:
+
+- Are tagged on the main branch following [SemVer](https://semver.org/).
+- Can be downloaded from the [releases page](https://github.com/yourusername/Distributed-Lite-Scheduler-V1/releases).
+- Are accompanied by a changelog describing notable changes per release.
+
+Following best practices, the source packages released are sufficient for a user to build and test the release provided they have access to the appropriate platform and tools.
+
+---
+
+## Convenience packages
+
+There are other ways of installing and using DLS. Those are "convenience" methods — they are not the only way to run the platform, but they are handy for users who do not want to build the software themselves.
+
+- [Docker Compose stack](docker-compose.yml) to bring up a complete local cluster with one command.
+- [Scheduler Dockerfile](scheduler/Dockerfile) / [Worker Dockerfile](worker/Dockerfile) to build standalone container images.
+- Pre-built images (planned) published to a public registry once the first release is cut.
+
+All these artifacts are built from the same `pom.xml` and Dockerfiles kept in this repository.
+
+---
+
+## Architecture
+
+DLS is split into two Maven modules — a **scheduler** (control plane) and a **worker** (remote executor) — that communicate over REST and Redis Streams.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                REST API / Swagger UI / CLI / OpenAPI         │
+│        [任务管理] [资源监控] [工作流编排] [租户与配额]          │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────┐
+│                   Scheduler (control plane)                  │
+│  • Leader election (Redisson)    • DAG parsing & topo sort   │
+│  • Resource-aware scheduling     • Task state machine        │
+│  • Multi-tenant quota guard      • Task dispatch & retry     │
+└──────────────────────┬──────────────────────────────────────┘
+                       │  REST + Redis Streams
+        ┌──────────────┴──────────────┐
+        │                             │
+┌───────▼──────────────┐   ┌──────────▼──────────────────────┐
+│ Worker (executor)    │   │ Worker (executor)                │
+│ • Heartbeat / reg    │   │ • Heartbeat / reg                │
+│ • Shell / Python     │   │ • Docker / HTTP                  │
+│ • Status callback    │   │ • Status callback                │
+└──────────────────────┘   └──────────────────────────────────┘
+        │                             │
+        └──────────────┬──────────────┘
+                       │
+        ┌──────────────┼──────────────┐
+        │              │              │
+┌───────▼──────┐ ┌────▼─────┐ ┌──────▼──────┐
+│ MySQL 8.0    │ │ Redis 7  │ │ MinIO / OSS │
+│ 元数据存储     │ │ 锁/队列   │ │ 日志归档      │
+└──────────────┘ └──────────┘ └─────────────┘
+```
+
+### Core design principles
+
+1. **High availability** — multiple scheduler instances, leader elected via a Redis distributed lock.
+2. **High reliability** — task persistence, retry on failure, idempotent state transitions, watchdog auto-renewal for locks.
+3. **High efficiency** — async dispatch, batched scans, Redis Stream event-driven completion handling, resource reservation.
+4. **Easy to operate** — structured logs, OpenAPI surface, health & metrics endpoints, single-command bring-up.
+
+---
+
+## Features
+
+### Resource-aware scheduling
+
+The defining feature of DLS: it schedules **resources**, not just **tasks**.
+
+```
+Traditional scheduler (e.g. XXL-Job):
+  Task A (CPU 4) → Node 1 (already running 8 tasks × 2 cores)
+  → memory pressure, task stalls ❌
+
+Distributed Lite Scheduler:
+  Task A needs { cpu: 4, memoryMb: 8192, gpu: 0 }
+  → quota check ✅ → find available node ✅ → reserve resource ✅ → dispatch ✅
+```
+
+Managed heterogeneous resources: **CPU cores**, **memory (MB / GB)**, **GPU cards + GPU model**.
+
+### Multi-tenancy
+
+Each tenant has its own resource quotas, task namespace, cost accounting, and audit log — ensuring fair allocation and preventing noisy neighbors from monopolizing the cluster.
+
+### DAG workflow orchestration
+
+```
+    ┌─→ Task B
+Task A ─┤
+    └─→ Task C ─→ Task D
+```
+
+- Topological sort with automatic dependency resolution.
+- Conditional and dynamic branching (`P4-4_CONDITIONAL_BRANCH_SUPPORT_DESIGN`).
+- Per-task retry, manual rerun of failed tasks, layer-level progress monitoring.
+
+### Pluggable executors
+
+| Executor | Runs on | Use case |
+|------------|-----------|-----------|
+| `shell` | Worker | Shell scripts, ops jobs |
+| `python` | Worker | Data processing, ML scripts |
+| `docker` | Worker | Containerized, fully isolated runs |
+| `http` | Scheduler | Remote call to an external service |
+| `java` (extension point) | Scheduler | In-process Java method invocation |
+
+### Distributed consistency
+
+- **Redis distributed locks (Redisson)** — scheduler leader election, per-task schedule mutex, resource-allocation mutex, with watchdog auto-renewal.
+- **Database optimistic locks** — concurrent control on task-state transitions and resource-node availability updates.
+- **Idempotency** — task ID de-duplication and idempotent message consumption on the worker callback path.
+
+### Scheduling algorithms
+
+The strategy is selectable via `SCHEDULER_STRATEGY` (`fifo` | `priority` | `resource-aware`):
+
+- **FIFO** — simple first-in-first-out queue (`P3-2`).
+- **Priority** — heap-based priority queue, supports task priority (`P3-3`).
+- **Resource-aware** — combines quota check, node availability, and backfill to maximize cluster utilization (`P3-4`).
+
+---
+
+## Project structure
 
 ```
 Distributed-Lite-Scheduler-V1/
-├── docs/                                    # 文档目录
-│   ├── PROJECT_PLAN.md                     # 项目规划
-│   ├── ENTITY_CLASSES.md                   # 实体类设计
-│   ├── DATABASE_DESIGN.md                  # 数据库设计详解
-│   ├── DATABASE_SUMMARY.md                 # 数据库表汇总
-│   ├── TASK_STATE_MACHINE_ROLLOUT_DESIGN.md  # 任务状态机设计
-│   ├── PROJECT_TASK_CRUD_ROLLOUT_DESIGN.md   # 项目-任务CRUD设计
-│   ├── RESOURCE_NODE_MANAGEMENT_ROLLOUT_DESIGN.md  # 资源节点管理设计
-│   ├── RESOURCE_SLOT_MANAGEMENT_ROLLOUT_DESIGN.md  # 资源槽位管理设计
-│   ├── TENANT_RESOURCE_QUOTA_ROLLOUT_DESIGN.md     # 租户配额管理设计
-│   ├── THREE_RESOURCE_COMPONENTS_GUIDE.md   # 三大资源组件详解指南
-│   ├── MULTI_TENANCY_ROLLOUT_DESIGN.md     # 多租户设计
-│   ├── REDIS_DESIGN.md                     # Redis分布式锁设计
-│   ├── BUSINESS_LOGIC.md                   # 业务逻辑总结
-│   ├── ADVANCED_FEATURES.md                # 高级功能说明
-│   ├── DEPLOYMENT_GUIDE.md                 # 部署指南
-│   ├── BUGFIX_GUIDE.md                     # Bug修复指南
-│   ├── schema.sql                          # 数据库Schema
-│   └── init-data.sql                       # 初始化数据
+├── scheduler/                                # Control plane (Spring Boot)
+│   └── src/main/java/com/imperium/distributed_lite_scheduler_v1/
+│       ├── DistributedLiteSchedulerV1Application.java
+│       ├── config/                            # Spring configs (Security, Mybatis, Async, …)
+│       ├── controller/                        # REST controllers
+│       ├── service/
+│       │   ├── scheduler/                     # Leader election, scheduling services
+│       │   ├── workflow/                      # DAG parsing, instance execution, stream
+│       │   ├── executor/                      # Pluggable task-type executors
+│       │   └── impl/                          # Service implementations
+│       ├── mapper/                            # MyBatis Plus mappers
+│       ├── model/                             # Entities + DTOs (workflow / resource / task)
+│       ├── security/                          # JWT, tenant access guard
+│       ├── exception/                         # Global exception handling
+│       └── utils/                             # Result wrappers, UUID, encryption
 │
-├── src/main/java/com/imperium/distributed_lite_scheduler_v1/
-│   ├── DistributedLiteSchedulerV1Application.java  # 主启动类
-│   ├── config/                             # 配置类
-│   │   ├── CryptoConfig.java               # 加密配置
-│   │   └── SecurityConfig.java             # Spring Security配置
-│   │
-│   ├── controller/                         # REST控制器
-│   │   ├── AuthController.java             # 认证接口
-│   │   ├── UserController.java             # 用户管理接口
-│   │   ├── TenantController.java           # 租户管理接口
-│   │   ├── ProjectController.java          # 项目管理接口
-│   │   ├── TaskController.java             # 任务定义接口
-│   │   ├── TaskInstanceController.java     # 任务实例接口
-│   │   ├── ResourceController.java         # 资源管理接口 (节点/槽位/配额)
-│   │
-│   ├── service/                            # 业务逻辑层
-│   │   ├── UserService.java                # 用户服务接口
-│   │   ├── TenantService.java              # 租户服务接口
-│   │   ├── ProjectService.java             # 项目服务接口
-│   │   ├── TaskService.java                # 任务定义服务接口
-│   │   ├── TaskInstanceService.java        # 任务实例服务接口
-│   │   ├── ResourceNodeService.java        # 资源节点服务接口
-│   │   ├── ResourceSlotService.java        # 资源槽位服务接口
-│   │   ├── ResourceQuotaService.java       # 资源配额服务接口
-│   │   │
-│   │   └── impl/                           # 服务实现
-│   │       ├── UserServiceImpl.java
-│   │       ├── TenantServiceImpl.java
-│   │       ├── ProjectServiceImpl.java
-│   │       ├── TaskServiceImpl.java
-│   │       ├── TaskInstanceServiceImpl.java
-│   │       ├── ResourceNodeServiceImpl.java
-│   │       ├── ResourceSlotServiceImpl.java
-│   │       └── ResourceQuotaServiceImpl.java
-│   │
-│   ├── mapper/                             # MyBatis+ Mapper接口
-│   │   ├── UserMapper.java
-│   │   ├── TenantMapper.java
-│   │   ├── ProjectMapper.java
-│   │   ├── TaskMapper.java
-│   │   ├── TaskInstanceMapper.java
-│   │   ├── TaskStatusChangeLogMapper.java
-│   │   ├── ResourceNodeMapper.java
-│   │   └── TenantMemberMapper.java
-│   │
-│   ├── model/                              # 数据模型
-│   │   ├── entity/                         # JPA/MyBatis实体类
-│   │   │   ├── User.java
-│   │   │   ├── Tenant.java
-│   │   │   ├── TenantMember.java
-│   │   │   ├── Project.java
-│   │   │   ├── Task.java
-│   │   │   ├── TaskInstance.java
-│   │   │   ├── TaskStatusChangeLog.java
-│   │   │   ├── ResourceNode.java
-│   │   │   ├── ResourceSlot.java
-│   │   │   ├── ResourceUsage.java
-│   │   │   └── ResourceQuota.java
-│   │   │
-│   │   └── dto/                            # 数据传输对象
-│   │       ├── CreateUserRequest.java
-│   │       ├── CreateTenantRequest.java
-│   │       ├── CreateProjectRequest.java
-│   │       ├── CreateTaskRequest.java
-│   │       └── (其他DTO...)
-│   │
-│   ├── security/                           # 安全相关
-│   │   ├── JwtTokenProvider.java           # JWT令牌提供者
-│   │   ├── JwtUserPrincipal.java           # JWT用户信息
-│   │   ├── TenantAccessGuard.java          # 租户访问控制
-│   │   └── SecurityConstants.java          # 安全常量
-│   │
-│   ├── exception/                          # 异常处理
-│   │   ├── GlobalExceptionHandler.java     # 全局异常处理器
-│   │   ├── SchedulerException.java         # 调度器异常
-│   │   └── ResourceAllocationException.java # 资源分配异常
-│   │
-│   └── utils/                              # 工具类
-│       ├── Result.java                     # API通用响应
-│       ├── ResultCode.java                 # 响应码定义
-│       ├── UUIDUtil.java                   # UUID生成
-│       ├── JwtUtil.java                    # JWT工具
-│       └── EncryptionUtil.java             # 加密工具
+├── worker/                                    # Remote executor (Spring Boot)
+│   └── src/main/java/com/imperium/distributed_lite_worker/
+│       ├── DistributedLiteWorkerApplication.java
+│       ├── bootstrap/                         # Registration + heartbeat
+│       ├── controller/                        # Worker run endpoint
+│       ├── executor/                          # Shell / Python / Docker executors
+│       ├── runtime/                           # Running task registry, process handles
+│       ├── service/                           # Scheduler node + callback clients
+│       └── security/                          # Worker token filter
 │
-├── src/main/resources/
-│   ├── application.yaml                    # 应用配置文件
-│   └── mapper/                             # MyBatis SQL映射文件
-│
-├── src/test/java/                          # 单元测试
-├── pom.xml                                 # Maven依赖配置
-├── mvnw / mvnw.cmd                         # Maven Wrapper脚本
-└── README.md                               # 本文件
+├── docs/                                      # Design documents (60+ files)
+├── tools/                                     # Helper tooling (e.g. Redis scripts)
+├── docker-compose.yml                         # Full local stack
+├── scheduler/Dockerfile  /  worker/Dockerfile
+├── pom.xml                                    # Maven parent (modules: scheduler, worker)
+├── .env.example                               # Environment template
+└── README.md                                  # This file
 ```
 
 ---
 
-## 🔧 主要功能模块
+## REST API surface
 
-### 1. 用户与认证模块 (User & Authentication)
+A quick map of the most-used endpoints (full schema in Swagger UI):
 
-- JWT令牌认证
-- 用户注册、登录、登出
-- 密码加密存储
+| Module | Method | Endpoint | Purpose |
+|------------|--------|-----------------------------|----------------------------|
+| Auth | POST | `/api/auth/login` | JWT login |
+| Tenant | POST | `/api/tenant` | Create tenant |
+| Project | POST | `/api/project` | Create project |
+| Task | POST | `/api/task` | Create task definition |
+| Task submit | POST | `/api/task/submit` | Submit a task instance |
+| Task instance | GET | `/api/task-instance/{id}` | Query instance status |
+| Resource | POST | `/api/resource/register` | Register a worker node |
+| Resource | POST | `/api/resource/reserve` | Reserve resources for a task |
+| Resource quota | POST | `/api/resource-quota/check` | Pre-check tenant quota |
+| Workflow | POST | `/api/workflow` | Create a DAG workflow |
+| Workflow execution | POST | `/api/workflow/{id}/run` | Trigger a workflow run |
+| Workflow instance | GET | `/api/workflow-instance/{id}` | Inspect a workflow run |
+| Workflow monitor | GET | `/api/workflow-instance/{id}/progress` | Layer-level progress |
 
-**API示例**
+Example — submit a task:
+
 ```bash
-# 用户登录
-POST /api/auth/login
-{
-  "username": "admin",
-  "password": "password123"
-}
-
-# 响应
-{
-  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-  "expiresIn": 86400
-}
-```
-
-### 2. 多租户管理模块 (Multi-Tenancy)
-
-- 租户创建、编辑、删除
-- 租户成员管理
-- 租户隔离和访问控制
-
-**API示例**
-```bash
-# 创建租户
-POST /api/tenant
-{
-  "tenantName": "DataTeam",
-  "tenantCode": "data_team",
-  "description": "Company data processing team"
-}
-
-# 响应
-{
-  "id": 1,
-  "tenantName": "DataTeam",
-  "tenantCode": "data_team",
-  "status": 1
-}
-```
-
-### 3. 项目管理模块 (Project Management)
-
-- 项目CRUD操作
-- 项目成员权限管理
-- 项目级别的任务组织
-
-**API示例**
-```bash
-# 创建项目
-POST /api/project
+POST /api/task/submit
 {
   "tenantId": 1,
-  "projectName": "ETL Pipeline",
-  "projectCode": "etl_01",
-  "description": "Daily data ETL process"
+  "projectId": 1,
+  "taskName": "etl-daily",
+  "resourceRequirement": { "cpu": 2, "memoryMb": 4096, "gpu": 0 },
+  "executor": { "type": "shell", "command": "bash run-etl.sh" }
 }
 ```
 
-### 4. 任务定义与实例模块 (Task Definition & Instance)
+---
 
-- 任务定义（模板）
-- 任务实例执行（记录）
-- 任务状态机管理
-- 任务重试、暂停、恢复
+## Configuration
 
-**任务状态流转**
-```
-CREATED → SUBMITTED → SCHEDULED → RUNNING → SUCCESS/FAILED
-           ↓
-        PAUSED → RESUMED → RUNNING
-```
+The scheduler reads its configuration from `scheduler/src/main/resources/application.yaml` and any `SPRING_*` / `SCHEDULER_*` / `WORKER_*` environment variables. The most important knobs:
 
-### 5. 资源管理模块 (Resource Management) ⭐
-
-这是系统的核心竞争力，分为三个子系统：
-
-#### 5.1 资源节点管理 (P2-1)
-- Worker节点的注册与去重
-- 节点心跳上报与健康检测
-- 节点状态维护（ONLINE/OFFLINE/MAINTENANCE）
-
-#### 5.2 资源槽位管理 (P2-2)
-- CPU/GPU/内存等资源的预留与释放
-- 资源使用记录（审计基础）
-- 防止资源超分配
-
-#### 5.3 租户资源配额管理 (P2-3)
-- 多租户资源上限配置
-- 预检查配额是否超额
-- 资源使用统计和对账
-
-**API示例**
-```bash
-# 注册资源节点
-POST /api/resource/register
-{
-  "nodeName": "worker-01",
-  "nodeHost": "192.168.1.10",
-  "nodePort": 9090,
-  "nodeType": "CPU",
-  "totalCpu": 8,
-  "totalMemoryMb": 16384,
-  "totalGpu": 0
-}
-
-# 预留资源
-POST /api/resource/reserve
-{
-  "tenantId": 1,
-  "taskInstanceId": 123,
-  "resourceRequirement": {
-    "cpu": 2,
-    "memoryMb": 4096,
-    "gpu": 0
-  }
-}
-```
-
-### 6. 调度引擎模块 (Scheduler Engine) - 规划中
-
-- DAG解析与依赖管理
-- Leader选举（Redis分布式锁）
-- 高级调度算法实现
-- 任务分配决策
+| Env var | Default | Meaning |
+|---------|-------------------------|-----------------------------------------|
+| `SPRING_DATASOURCE_URL` | `jdbc:mysql://localhost:3306/...` | Metadata DB JDBC URL |
+| `REDIS_HOST` / `REDIS_PORT` | `localhost` / `6379` | Redis for locks, streams, cache |
+| `JWT_SECRET` | (dev only) | HS256 signing key (≥ 32 bytes) |
+| `INTERNAL_API_TOKEN` | — | Token for internal service-to-service calls |
+| `SCHEDULER_STRATEGY` | `resource-aware` | `fifo` \| `priority` \| `resource-aware` |
+| `SCHEDULER_LEADER_LOCK_KEY` | `scheduler:leader:lock` | Redis key for leader election |
+| `TASK_EXECUTOR_MODE` | `in-process` | `in-process` \| `remote` (dispatch to workers) |
+| `WORKER_API_TOKEN` | — | Shared token between scheduler and workers |
+| `WORKER_NODE_NAME` | `worker-docker-1` | Worker registration name |
+| `WORKER_TOTAL_CPU` / `WORKER_TOTAL_MEMORY_MB` | `4` / `8192` | Worker advertised capacity |
 
 ---
 
-## 💻 技术栈
+## Semantic versioning
 
-### 后端技术
+As of the first tagged release, DLS follows a strict [SemVer](https://semver.org/) approach:
 
-| 技术                   | 版本 | 用途 |
-|----------------------|------|------|
-| **Java**             | 21 | 编程语言 |
-| **Spring Boot**      | 4.0.5 | Web框架 |
-| **Spring Security**  | 6.x | 认证和授权 |
-| **MyBatis**          | 4.0 | ORM框架 |
-| **MyBatis Plus**     | 3.5.15 | ORM增强框架 |
-| **MySQL/PostgreSQL** | 5.7+/12+ | 关系数据库 |
-| **Redis**            | 6.0+ | 分布式锁、缓存、队列 |
-| **Redisson**         | 3.x | Redis客户端 |
-| **JJWT**             | 0.12.6 | JWT令牌处理 |
-| **Lombok**           | 1.18.44 | 代码简化 |
-| **Validation**       | 4.0 | 参数校验 |
+- **MAJOR** — incompatible API or schema changes.
+- **MINOR** — new features, backward-compatible.
+- **PATCH** — bug fixes and documentation-only changes.
 
-### 开发工具
-
-| 工具 | 用途 |
-|------|------|
-| **Maven** | 项目构建和依赖管理 |
-| **Git** | 版本控制 |
-| **Docker** | 容器化 (可选) |
-| **IntelliJ IDEA** | IDE (推荐) |
+Schema migrations and DAG/DTO contracts are considered part of the public API; breaking changes there bump the MAJOR version.
 
 ---
 
-## 📅 开发计划
+## Version life cycle
 
-### Phase 1: 核心平台基础（已完成/进行中）
+| Version | Current patch | State | First release | Limited maintenance | EOL |
+|-----------|------------------|----------|-----------------|------------------------|------|
+| 1.x | 0.0.1-SNAPSHOT | Development | TBD | TBD | TBD |
 
-- [x] 系统架构设计
-- [x] 数据库表设计
-- [x] 用户认证与授权
-- [x] 租户隔离框架
-- [x] 项目管理模块
-- [ ] 任务定义与实例
-
-### Phase 2: 资源管理系统（规划中）
-
-- [ ] **P2-1** 资源节点管理 - Worker注册、心跳、健康检测
-- [ ] **P2-2** 资源槽位管理 - 资源预留、释放、追踪
-- [ ] **P2-3** 租户资源配额 - 配额管理、超额检查、成本控制
-
-### Phase 3: 调度引擎（规划中）
-
-- [ ] DAG工作流解析
-- [ ] 高级调度算法 (Fair Scheduling, Backfill, Preemption)
-- [ ] Leader选举与分布式锁
-- [ ] 任务分配决策引擎
-
-### Phase 4: 监控与运维（规划中）
-
-- [ ] 可视化仪表板
-- [ ] 实时告警系统
-- [ ] 性能指标收集
-- [ ] 日志查询与分析
-
-### Phase 5: 增强功能（规划中）
-
-- [ ] 插件化执行器 (Shell/Python/Docker/HTTP)
-- [ ] 自动重试与降级
-- [ ] 任务链路追踪
-- [ ] API限流与熔断
+Limited-support versions receive only security and critical bug fixes. EOL versions receive no fixes or support. We always recommend running the latest available patch release.
 
 ---
 
-## 📚 文档指南
+## Roadmap
 
-本项目提供了详细的设计文档，建议按照以下顺序阅读：
+### Phase 1 — Core platform (done)
 
-### 快速入门
-1. 本 README 文件 - 项目概览
-2. [PROJECT_PLAN.md](docs/PROJECT_PLAN.md) - 项目规划详情
+- [x] System architecture & database design
+- [x] User authentication & authorization (JWT)
+- [x] Multi-tenant isolation framework
+- [x] Project management module
+- [x] Task definition & instance lifecycle
 
-### 架构与设计
-3. [DATABASE_DESIGN.md](docs/DATABASE_DESIGN.md) - 数据库完整设计
-4. [ENTITY_CLASSES.md](docs/ENTITY_CLASSES.md) - 实体类详解
-5. [BUSINESS_LOGIC.md](docs/BUSINESS_LOGIC.md) - 业务逻辑整体梳理
+### Phase 2 — Resource management (done)
 
-### 核心功能设计
-6. [TASK_STATE_MACHINE_ROLLOUT_DESIGN.md](docs/TASK_STATE_MACHINE_ROLLOUT_DESIGN.md) - 任务状态机
-7. [PROJECT_TASK_CRUD_ROLLOUT_DESIGN.md](docs/PROJECT_TASK_CRUD_ROLLOUT_DESIGN.md) - 项目任务管理
+- [x] **P2-1** Resource node management — worker registration, heartbeat, health check
+- [x] **P2-2** Resource slot management — reserve / release / track
+- [x] **P2-3** Tenant resource quota — quotas, pre-check, accounting
 
-### 资源管理（⭐ 系统核心）
-8. [THREE_RESOURCE_COMPONENTS_GUIDE.md](docs/THREE_RESOURCE_COMPONENTS_GUIDE.md) - **三大资源组件详解**（推荐先读）
-9. [RESOURCE_NODE_MANAGEMENT_ROLLOUT_DESIGN.md](docs/RESOURCE_NODE_MANAGEMENT_ROLLOUT_DESIGN.md) - 资源节点管理
-10. [RESOURCE_SLOT_MANAGEMENT_ROLLOUT_DESIGN.md](docs/RESOURCE_SLOT_MANAGEMENT_ROLLOUT_DESIGN.md) - 资源槽位管理
-11. [TENANT_RESOURCE_QUOTA_ROLLOUT_DESIGN.md](docs/TENANT_RESOURCE_QUOTA_ROLLOUT_DESIGN.md) - 租户配额管理
+### Phase 3 — Scheduling engine (done)
 
-### 高级话题
-12. [MULTI_TENANCY_ROLLOUT_DESIGN.md](docs/MULTI_TENANCY_ROLLOUT_DESIGN.md) - 多租户架构
-13. [REDIS_DESIGN.md](docs/REDIS_DESIGN.md) - 分布式锁设计
-14. [ADVANCED_FEATURES.md](docs/ADVANCED_FEATURES.md) - 高级功能说明
+- [x] **P3-1** Task submit queue
+- [x] **P3-2** FIFO scheduler
+- [x] **P3-3** Priority scheduler
+- [x] **P3-4** Resource-aware scheduler
+- [x] **P3-5** Concurrency safety (locks + idempotency)
 
-### 运维指南
-15. [DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) - 部署指南
-16. [BUGFIX_GUIDE.md](docs/BUGFIX_GUIDE.md) - Bug修复指南
+### Phase 4 — DAG workflow engine (done)
 
-### SQL资源
-17. [schema.sql](docs/schema.sql) - 完整数据库Schema
-18. [init-data.sql](docs/init-data.sql) - 初始化数据
+- [x] **P4-1** Workflow definition & parsing
+- [x] **P4-2** Topological sort engine
+- [x] **P4-3** Workflow instance execution
+- [x] **P4-4** Conditional branch support
 
----
+### Phase 5 — Operations & extensions (planned)
 
-## 🤝 贡献指南
+- [ ] Visualization dashboard
+- [ ] Real-time alerting
+- [ ] Metrics collection & log analysis
+- [ ] API rate limiting & circuit breaking
+- [ ] Task tracing across the scheduler → worker hop
 
-### 如何贡献
-
-1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 开启 Pull Request
-
-### 代码规范
-
-- 遵循 Google Java Style Guide
-- 所有公共方法必须有JavaDoc注释
-- 单元测试覆盖率不低于80%
-- 使用 Lombok 简化 getter/setter
-- 使用 @Transactional 管理事务
-
-### 报告问题
-
-如发现 Bug 或有建议，请通过 Issues 提出：
-- 详细描述问题现象
-- 提供复现步骤
-- 附加相关日志和错误截图
+See [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) and [docs/项目未来完善方向.md](docs/项目未来完善方向.md) for the full roadmap.
 
 ---
 
-## 📖 学习资源
+## Documentation
 
-### 推荐阅读
+The project ships with an extensive design-document set under [`docs/`](docs). Suggested reading order:
 
-- [Spring Boot 官方文档](https://spring.io/projects/spring-boot)
-- [MyBatis Plus 官方文档](https://baomidou.com/)
-- [Redisson 官方文档](https://github.com/redisson/redisson)
-- [分布式系统设计] - 理论基础
+### Getting started
+1. This README — project overview
+2. [PROJECT_PLAN.md](docs/PROJECT_PLAN.md) — project plan
+3. [Project_Overview.md](docs/Project_Overview.md) — high-level overview
 
-### 相关项目
+### Architecture & design
+4. [DATABASE_DESIGN.md](docs/DATABASE_DESIGN.md) — full database design
+5. [ER_DIAGRAM.md](docs/ER_DIAGRAM.md) — ER diagram
+6. [ENTITY_CLASSES.md](docs/ENTITY_CLASSES.md) — entity classes
+7. [BUSINESS_LOGIC.md](docs/BUSINESS_LOGIC.md) — business logic walkthrough
 
-- [XXL-Job](https://github.com/xuxueli/xxl-job) - 轻量级分布式任务调度
-- [Apache Airflow](https://github.com/apache/airflow) - 工作流编排平台
-- [Kubernetes](https://github.com/kubernetes/kubernetes) - 容器编排
+### Resource management (core)
+8. [THREE_RESOURCE_COMPONENTS_GUIDE.md](docs/THREE_RESOURCE_COMPONENTS_GUIDE.md) — the three resource components (recommended first)
+9. [RESOURCE_NODE_MANAGEMENT_ROLLOUT_DESIGN.md](docs/RESOURCE_NODE_MANAGEMENT_ROLLOUT_DESIGN.md)
+10. [RESOURCE_SLOT_MANAGEMENT_ROLLOUT_DESIGN.md](docs/RESOURCE_SLOT_MANAGEMENT_ROLLOUT_DESIGN.md)
+11. [TENANT_RESOURCE_QUOTA_ROLLOUT_DESIGN.md](docs/TENANT_RESOURCE_QUOTA_ROLLOUT_DESIGN.md)
+
+### Scheduling engine
+12. [P3-2_FIFO_SCHEDULER_DESIGN.md](docs/P3-2_FIFO_SCHEDULER_DESIGN.md)
+13. [P3-3_PRIORITY_SCHEDULER_DESIGN.md](docs/P3-3_PRIORITY_SCHEDULER_DESIGN.md)
+14. [P3-4_RESOURCE_AWARE_SCHEDULER_DESIGN.md](docs/P3-4_RESOURCE_AWARE_SCHEDULER_DESIGN.md)
+15. [P3-5_CONCURRENCY_SAFETY_DESIGN.md](docs/P3-5_CONCURRENCY_SAFETY_DESIGN.md)
+
+### DAG workflow engine
+16. [P4_DAG_WORKFLOW_ENGINE_DESIGN.md](docs/P4_DAG_WORKFLOW_ENGINE_DESIGN.md)
+17. [P4-1_WORKFLOW_DEFINITION_AND_PARSING_DESIGN.md](docs/P4-1_WORKFLOW_DEFINITION_AND_PARSING_DESIGN.md)
+18. [P4-2_TOPOLOGICAL_SORT_ENGINE_DESIGN.md](docs/P4-2_TOPOLOGICAL_SORT_ENGINE_DESIGN.md)
+19. [P4-3_WORKFLOW_INSTANCE_EXECUTION_DESIGN.md](docs/P4-3_WORKFLOW_INSTANCE_EXECUTION_DESIGN.md)
+20. [P4-4_CONDITIONAL_BRANCH_SUPPORT_DESIGN.md](docs/P4-4_CONDITIONAL_BRANCH_SUPPORT_DESIGN.md)
+
+### Reliability & runtime
+21. [REDIS_DESIGN.md](docs/REDIS_DESIGN.md) — distributed lock design
+22. [REDIS_STREAM_EVENT_DRIVEN_UPGRADE.md](docs/REDIS_STREAM_EVENT_DRIVEN_UPGRADE.md)
+23. [CONCURRENCY_CONTROL_GUIDE.md](docs/CONCURRENCY_CONTROL_GUIDE.md)
+24. [TASK_STATE_MACHINE_ROLLOUT_DESIGN.md](docs/TASK_STATE_MACHINE_ROLLOUT_DESIGN.md)
+
+### Worker integration
+25. [WORKER_CALLBACK_DOCS_NAVIGATION.md](docs/WORKER_CALLBACK_DOCS_NAVIGATION.md)
+26. [WORKER_CALLBACK_FINAL_STATE_MAPPING.md](docs/WORKER_CALLBACK_FINAL_STATE_MAPPING.md)
+
+### Operations
+27. [DEPLOYMENT_GUIDE.md](docs/DEPLOYMENT_GUIDE.md) — deployment guide
+28. [BUGFIX_GUIDE.md](docs/BUGFIX_GUIDE.md) — bug-fix playbook
+29. [ADVANCED_FEATURES.md](docs/ADVANCED_FEATURES.md) — advanced features
+
+### SQL resources
+30. `docs/schema-complete.sql` — full schema (auto-loaded by Docker Compose)
+31. `docs/init-data.sql` — seed data
 
 ---
 
-## 📝 许可证
+## Contributing
 
-本项目采用 MIT 许可证。详见 [LICENSE](LICENSE) 文件。
+Want to help build Distributed Lite Scheduler? Check out the contribution workflow below.
+
+1. Fork the repository.
+2. Create a feature branch (`git checkout -b feature/AmazingFeature`).
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`).
+4. Push to the branch (`git push origin feature/AmazingFeature`).
+5. Open a Pull Request.
+
+### Code conventions
+
+- Follow [Google Java Style Guide](https://google.github.io/styleguide/javaguide.html).
+- All public methods must have Javadoc comments.
+- Unit test coverage should not be lower than 80%.
+- Use Lombok to reduce boilerplate getters/setters.
+- Annotate service methods with `@Transactional` where appropriate.
+- Keep DTOs and entities in their respective packages under `model/`.
+
+### Reporting issues
+
+If you find a bug or have a suggestion, please open an issue with:
+
+- A clear description of the symptom.
+- Steps to reproduce.
+- Relevant logs, error messages, or screenshots.
+- The scheduler / worker version you are running.
 
 ---
 
-## 📞 联系方式
+## Community standards
 
-- 📧 Email: support@example.com
-- 💬 Issues: [GitHub Issues](https://github.com/yourusername/Distributed-Lite-Scheduler-V1/issues)
-- 📖 Wiki: [GitHub Wiki](https://github.com/yourusername/Distributed-Lite-Scheduler-V1/wiki)
+Everyone interacting with the Distributed Lite Scheduler project — on GitHub, issues, or any other channel — is expected to follow standard open-source etiquette and be respectful of contributors' time. Abusive behavior, spam, or sustained disruptive conduct may result in PRs being closed and, in extreme cases, reports being filed with GitHub.
 
 ---
 
-## 🙏 致谢
+## Who maintains Distributed Lite Scheduler?
 
-感谢所有贡献者和使用本项目的用户。本项目的设计灵感来自于：
-
-- XXL-Job 的简洁设计
-- Kubernetes 的资源调度理念
-- Apache Airflow 的工作流概念
+DLS is currently maintained by its original author. The [core committers](https://github.com/yourusername/Distributed-Lite-Scheduler-V1/graphs/contributors) are responsible for reviewing and merging PRs as well as steering conversations around new feature requests. If you would like to become a maintainer, start by consistently contributing high-quality PRs and participating in design discussions under `docs/`.
 
 ---
 
-**🎉 祝你使用本项目愉快！如有任何问题，欢迎通过Issues反馈。**
+## What goes into the next release?
+
+We follow [SemVer](https://semver.org/):
+
+- **MAJOR** — breaking API or schema changes.
+- **MINOR** — new features, backward-compatible.
+- **PATCH** — bug fixes and documentation-only changes.
+
+Most of the time, PRs merged to `main` will land in the next `MINOR` release. Bug-fix-only PRs may be cherry-picked to the current `MINOR` branch and released as a `PATCH` — the release manager makes the final cherry-pick decision. Issues are usually not pinned to a milestone; the linked PR is the source of truth for which release shipped a fix.
 
 ---
 
-**最后更新**: 2026年4月11日 | **当前版本**: V1.0.0-SNAPSHOT
+## Related projects
+
+DLS stands on the shoulders of several great open-source projects:
+
+- [Apache Airflow](https://github.com/apache/airflow) — workflow orchestration platform (DAG model inspiration).
+- [XXL-Job](https://github.com/xuxueli/xxl-job) — lightweight distributed task scheduler (simplicity inspiration).
+- [Kubernetes](https://github.com/kubernetes/kubernetes) — container orchestration (resource-scheduling inspiration).
+- [Spring Boot](https://spring.io/projects/spring-boot) — application framework.
+- [MyBatis Plus](https://baomidou.com/) — ORM enhancement.
+- [Redisson](https://github.com/redisson/redisson) — Redis client with distributed primitives.
+
+---
+
+## Links
+
+- [Documentation](docs/)
+- [Project Plan](docs/PROJECT_PLAN.md)
+- [Issue tracker](https://github.com/yourusername/Distributed-Lite-Scheduler-V1/issues)
+- [Wiki](https://github.com/yourusername/Distributed-Lite-Scheduler-V1/wiki)
+
+---
+
+## License
+
+Distributed Lite Scheduler is released under the **MIT License**. See [LICENSE](LICENSE) for details.
+
+---
+
+## Contact
+
+- Issues: [GitHub Issues](https://github.com/yourusername/Distributed-Lite-Scheduler-V1/issues)
+- Wiki: [GitHub Wiki](https://github.com/yourusername/Distributed-Lite-Scheduler-V1/wiki)
+- Email: support@example.com
+
+---
+
+## Acknowledgements
+
+Thanks to all contributors and users of this project. The design draws inspiration from:
+
+- The simplicity of **XXL-Job**.
+- The resource-scheduling philosophy of **Kubernetes**.
+- The workflow concepts of **Apache Airflow**.
+
+---
+
+**Last updated**: 2026-07-11 &nbsp;|&nbsp; **Current version**: 0.0.1-SNAPSHOT
